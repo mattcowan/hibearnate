@@ -8,15 +8,17 @@
     turns into hibernate, and the network is off during standby.
 
     Keep Working: closing the lid does nothing and the system does not idle
-    sleep, for a fixed time or until switched back. When it ends, the machine
-    returns to Away and hibernates if the lid is closed or nobody is using it.
+    sleep, for a fixed time or until switched back. When it ends (or the
+    battery falls to the floor), the machine returns to Away and hibernates
+    once nobody is using it. Every clean way out of the app puts Away back.
 
     Auto: Keep Working while a Claude Code session looks busy, Away otherwise.
-    "Busy" is a Working card on the status dashboard OR a claude.exe process
-    tree that started a new process or used CPU since the last poll. Either
+    "Busy" is a Working card on the status dashboard OR a Claude session's
+    process tree (claude.exe, or node.exe running Claude Code's cli.js) that
+    started a new process or used CPU since the last poll. Either
     signal alone is enough, because neither is reliable alone: cards can go
-    stale, and claude.exe uses about as little CPU while the model generates
-    as it does idle (only tool runs show up).
+    stale, and a Claude session uses about as little CPU while the model
+    generates as it does idle (only tool runs show up).
 
     See readme.md for install steps and the reason behind each setting.
 
@@ -155,39 +157,66 @@ function Get-DashboardWorking {
     }
 }
 
-# ---------------------------------------------------------------- self-test
-
-if ($SelfTest) {
-    'Settings before:'
-    foreach ($key in $Settings.Keys) {
-        $v = [WindowsPowerProfiles.PowerSettings]::Read($Settings[$key].Sub, $Settings[$key].Id)
-        '  {0,-15} AC={1,-10} DC={2}' -f $key, $v[0], $v[1]
-    }
-    foreach ($name in 'KeepWorking', 'Away') {
-        $failed = Set-PowerProfile $name
-        if ($failed) { "Profile $name FAILED: $($failed -join '; ')" } else { "Profile $name applied and verified." }
-    }
-    [WindowsPowerProfiles.PowerSettings]::KeepSystemAwake($false)
-
-    $activity = New-Object WindowsPowerProfiles.ClaudeActivity 'claude.exe'
-    $null = $activity.Sample($Config.ClaudeBusyCpuMs)
-    Start-Sleep -Seconds $Config.PollSeconds
-    $sample = $activity.Sample($Config.ClaudeBusyCpuMs)
-    'Claude sessions: {0}, busy: {1}, new processes: {2}, max CPU ms in {3}s: {4:N0}' -f $sample.Sessions, $sample.BusySessions, $sample.Spawns, $Config.PollSeconds, $sample.MaxCpuMs
-    "  per session (pid:cpu+spawns): $($sample.Detail)"
-    "Dashboard Working cards (fresh): $(Get-DashboardWorking)"
-    "Idle for: $(Format-Span ([WindowsPowerProfiles.UserIdle]::Get()))"
-    return
-}
-
 # ---------------------------------------------------------------- single instance
 
-$createdNew = $false
-$mutex = New-Object System.Threading.Mutex($true, 'Local\WindowsPowerProfiles', [ref]$createdNew)
-if (-not $createdNew) {
+# Taken before the self-test too: the self-test rewrites the power settings,
+# and a running tray would keep showing the state it thinks it applied.
+# Ownership comes from WaitOne(0), not from the createdNew flag of the
+# constructor: createdNew only says whether the named mutex already existed,
+# so any handle left open (for example by a self-test run inside an
+# interactive shell) would make every later start think a tray was running.
+$mutex = New-Object System.Threading.Mutex($false, 'Local\WindowsPowerProfiles')
+try {
+    $owned = $mutex.WaitOne(0)
+} catch [System.Threading.AbandonedMutexException] {
+    $owned = $true  # the previous owner died without releasing it; we own it now
+}
+if (-not $owned) {
+    $mutex.Dispose()
+    if ($SelfTest) {
+        $Host.UI.WriteErrorLine('The tray app is running. Use Exit in its menu, then run -SelfTest again.')
+        exit 1
+    }
     Write-Log 'Second instance exited; one is already running.'
     return
 }
+
+# ---------------------------------------------------------------- self-test
+
+if ($SelfTest) {
+    try {
+        'Settings before:'
+        foreach ($key in $Settings.Keys) {
+            $v = [WindowsPowerProfiles.PowerSettings]::Read($Settings[$key].Sub, $Settings[$key].Id)
+            '  {0,-15} AC={1,-10} DC={2}' -f $key, $v[0], $v[1]
+        }
+        foreach ($name in 'KeepWorking', 'Away') {
+            $failed = Set-PowerProfile $name
+            if ($failed) { "Profile $name FAILED: $($failed -join '; ')" } else { "Profile $name applied and verified." }
+        }
+        [WindowsPowerProfiles.PowerSettings]::KeepSystemAwake($false)
+
+        $activity = New-Object WindowsPowerProfiles.ClaudeActivity 'claude.exe'
+        $null = $activity.Sample($Config.ClaudeBusyCpuMs)
+        Start-Sleep -Seconds $Config.PollSeconds
+        $sample = $activity.Sample($Config.ClaudeBusyCpuMs)
+        'Claude sessions: {0}, busy: {1}, new processes: {2}, max CPU ms in {3}s: {4:N0}' -f $sample.Sessions, $sample.BusySessions, $sample.Spawns, $Config.PollSeconds, $sample.MaxCpuMs
+        "  per session (pid:cpu+spawns): $($sample.Detail)"
+        "Dashboard Working cards (fresh): $(Get-DashboardWorking)"
+        "Idle for: $(Format-Span ([WindowsPowerProfiles.UserIdle]::Get()))"
+    } finally {
+        # Release and close the handle: in an interactive shell the process
+        # lives on, and an open handle would outlive this run.
+        $mutex.ReleaseMutex()
+        $mutex.Dispose()
+    }
+    return
+}
+
+# Uninstall.ps1 sets this event to ask the tray to exit cleanly (and so put
+# the Away settings back) instead of being killed in Keep Working.
+$ExitEvent = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, 'Local\WindowsPowerProfiles.Exit')
+$ExitEvent.Reset()
 
 # ---------------------------------------------------------------- state
 
@@ -245,6 +274,7 @@ function Update-Tray {
         'Auto' {
             if ($State.Effective -eq 'KeepWorking') { "Power: Auto, awake ($($State.AutoReason))" }
             elseif ($State.AutoCapped) { 'Power: Auto, Away (time cap reached)' }
+            elseif ($null -ne (Get-LowBattery)) { 'Power: Auto, Away (battery low)' }
             else { 'Power: Auto, Away (Claude idle)' }
         }
     }
@@ -380,6 +410,7 @@ function Update-AutoMode {
     }
 
     if ($State.Effective -eq 'Away' -and $busy) {
+        if ($null -ne (Get-LowBattery)) { return }  # Test-Battery would only end it again
         $State.AutoAwakeSince = $now
         $State.PendingHibernate = $false
         Set-Effective 'KeepWorking' "Auto: $($State.AutoReason)"
@@ -395,15 +426,39 @@ function Update-AutoMode {
     }
 }
 
+# Returns the battery percent (0-100) when on battery at or below the floor,
+# otherwise $null. BatteryLifePercent is a float, and 0.15f widens to
+# 0.15000000596, so compare whole percents rather than fractions.
+function Get-LowBattery {
+    $power = [System.Windows.Forms.SystemInformation]::PowerStatus
+    if ($power.PowerLineStatus -ne 'Offline') { return $null }
+    $percent = [int][math]::Round($power.BatteryLifePercent * 100)
+    if ($percent -le $Config.BatteryFloorPercent) { return $percent }
+    return $null
+}
+
+# Low battery ends Keep Working the same way a timer does: back to Away, then
+# hibernate once nobody is using the machine (after 2 idle minutes with the lid
+# shut). Not an immediate hibernate: that path had no idle check, and in Auto
+# it looped (wake, card still busy, Keep Working again, hibernate again).
+# Windows still hibernates on its own at the critical level (2% on this machine).
 function Test-Battery {
     if ($State.Effective -ne 'KeepWorking') { return }
-    $power = [System.Windows.Forms.SystemInformation]::PowerStatus
-    if ($power.PowerLineStatus -eq 'Offline' -and $power.BatteryLifePercent -le ($Config.BatteryFloorPercent / 100)) {
-        Invoke-Hibernate ('battery at {0:P0}' -f $power.BatteryLifePercent)
+    $percent = Get-LowBattery
+    if ($null -eq $percent) { return }
+    if ($State.Mode -eq 'Auto') {
+        Set-Effective 'Away' "Auto: battery at $percent%"
+    } else {
+        Enter-Away "battery at $percent%"
     }
+    Complete-Work "Battery at $percent%"
 }
 
 function Invoke-Poll {
+    if ($ExitEvent.WaitOne(0)) {
+        Stop-App 'exit requested by Uninstall.ps1'
+        return
+    }
     if ($State.Mode -eq 'KeepWorking' -and $State.KeepUntil -and (Get-Date) -ge $State.KeepUntil) {
         Enter-Away 'timer ended'
         Complete-Work 'Keep Working time ended'
@@ -475,14 +530,21 @@ $MenuExplorer.add_Click({ try { Restart-Explorer } catch { Write-Log "ERROR: $_"
 $MenuLog = New-Object System.Windows.Forms.ToolStripMenuItem 'Open log'
 $MenuLog.add_Click({ if (Test-Path $LogPath) { Start-Process notepad.exe $LogPath } })
 
-$MenuExit = New-Object System.Windows.Forms.ToolStripMenuItem 'Exit (sets Away)'
-$MenuExit.add_Click({
-    try { Set-Effective 'Away' 'exit'; Write-Log 'Exit' } catch { Write-Log "ERROR on exit: $_" }
+# Keep Working writes "lid does nothing" and "never sleep" into the power
+# scheme, and those values outlive the process. Every way out of the app that
+# runs code puts Away back: this function, the session-end handler, and the
+# finally block around Application.Run. Only a hard kill or a crash of the
+# process itself skips all three; the next launch (at login) applies Away.
+function Stop-App([string]$Why) {
+    try { Set-Effective 'Away' 'exit'; Write-Log "Exit: $Why" } catch { Write-Log "ERROR on exit: $_" }
     $Timer.Stop()
     $Window.Dispose()
     $Tray.Visible = $false
     [System.Windows.Forms.Application]::Exit()
-})
+}
+
+$MenuExit = New-Object System.Windows.Forms.ToolStripMenuItem 'Exit (sets Away)'
+$MenuExit.add_Click({ Stop-App 'menu' })
 
 [void]$Menu.Items.AddRange(@(
     $MenuAway, $MenuKeep, $MenuAuto,
@@ -521,6 +583,19 @@ $Window.add_DisplayChanged({
     if ($Window.DisplayState -eq 1) { $State.LastDisplayOn = Get-Date }
     Write-Log "Display $label"
 })
+$Window.add_SessionEnding({
+    # Without this, a restart in Keep Working boots to a lock screen with the
+    # lid ignored until the next login starts the app. Write the profile
+    # directly: Windows gives this handler little time.
+    try {
+        if ($State.Effective -ne 'Away') {
+            $failed = Set-PowerProfile 'Away'
+            $State.Effective = 'Away'
+            if ($failed) { Write-Log "WARNING: session ending, Away applied with errors: $($failed -join '; ')" }
+            else { Write-Log 'Session ending: Away applied' }
+        }
+    } catch { Write-Log "ERROR on session end: $_" }
+})
 $Window.RegisterPowerNotifications()
 
 # ---------------------------------------------------------------- run
@@ -538,8 +613,16 @@ $Timer.Start()
 try {
     [System.Windows.Forms.Application]::Run()
 } finally {
+    if ($State.Effective -ne 'Away') {
+        try {
+            $failed = Set-PowerProfile 'Away'
+            if ($failed) { Write-Log "WARNING: unexpected exit, Away applied with errors: $($failed -join '; ')" }
+            else { Write-Log 'Away applied on unexpected exit' }
+        } catch { Write-Log "ERROR: $_" }
+    }
     [WindowsPowerProfiles.PowerSettings]::KeepSystemAwake($false)
     $Tray.Visible = $false
     $Tray.Dispose()
     $mutex.ReleaseMutex()
+    $mutex.Dispose()
 }

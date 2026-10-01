@@ -53,22 +53,24 @@ When the timer ends, the app goes back to Away. When Auto sees that the work is 
 - If the lid is open, the app hibernates after 10 minutes with no input.
 - If somebody uses the keyboard or the mouse first, the app cancels the hibernate. This prevents a hibernate when the lid is closed on a dock.
 
-On battery, Keep Working hibernates the laptop when the charge falls to 15%.
+On battery, the charge can fall to 15% or less in Keep Working. Then the app goes back to Away and hibernates the laptop with the same idle rules. Auto does not go back to Keep Working while the charge stays at 15% or less. Windows also hibernates the laptop at 2% by itself.
 
 ### How Auto decides
 
 Auto checks every 10 seconds. A session is busy if one of these is true:
 
 - The status dashboard at `http://127.0.0.1:4787` has a card in the Working column with activity in the last 6 hours.
-- A process tree under `claude.exe` started a new process since the last check. A session that runs tools starts `bash`, `git`, and similar processes all the time. A quiet session starts none.
-- A process tree under `claude.exe` used 2 seconds of CPU in the last 10 seconds. This catches a long build or test run.
+- The process tree of a Claude session started a new process since the last check. A session that runs tools starts `bash`, `git`, and similar processes all the time. A quiet session starts none.
+- The process tree of a Claude session used 2 seconds of CPU in the last 10 seconds. This catches a long build or test run.
+
+A Claude session is a `claude.exe` process or a `node.exe` process that runs the Claude Code `cli.js`. The VS Code extension uses `claude.exe`. The `claude` command from `npm install -g` uses `node.exe`.
 
 One signal is enough. Auto goes back to Away after 10 minutes with no signal. Auto stays awake for a maximum of 3 hours at a time. After that, it stays in Away until all signals are quiet.
 
 Each signal has a gap:
 
 - A dashboard card can stay in Working after its session stops.
-- `claude.exe` uses almost no CPU while the model writes a reply. The process checks see only tool runs.
+- A Claude session uses almost no CPU while the model writes a reply. The process checks see only tool runs.
 - A tool command that starts and stops between two checks is not seen.
 
 The 10-minute quiet period and the dashboard card cover most of these gaps.
@@ -92,7 +94,16 @@ The app changes four settings on the active power plan. It changes the AC value 
 | Hibernate after standby | 20 min | 20 min | Never |
 | Network in standby | Off | Off | On AC, managed DC |
 
-In Keep Working, the app also holds a "system required" request. This request stops idle sleep. Windows removes the request if the app stops, so a crash cannot keep the laptop awake.
+In Keep Working, the app also holds a "system required" request. This request stops idle sleep. Windows removes the request when the app stops.
+
+The Keep Working values for the lid and for sleep stay in the power plan after the app stops. So the app puts the Away values back when it stops:
+
+- When you use Exit in the tray menu.
+- When `Uninstall.ps1` asks the app to stop.
+- When Windows signs you out, restarts, or shuts down.
+- When the app stops because of an error in the script.
+
+If something stops the app by force in Keep Working, the lid stays ignored. This includes Task Manager and a crash of PowerShell itself. The next start of the app puts Away back, and the app starts at each login. To fix it at once, start the app again or run `.\Restore-Baseline.ps1`.
 
 The app reads and writes the settings through the `powrprof` API in `PowerProfiles.cs`. It does not parse the output of `powercfg`. On this laptop, `powercfg /query` hides the lid close action, and only `powercfg /qh` shows it. The API sees hidden settings, and it does not depend on the display language.
 
@@ -106,15 +117,17 @@ Change the values in the `$Config` block at the top of `PowerProfiles.ps1`. Then
 
 To tune Auto, start the app with `-TraceAuto`. The app then writes the Auto inputs to the log at every check.
 
-To test the settings without the tray, run `.\PowerProfiles.ps1 -SelfTest`. It applies both profiles, reads them back, samples the Claude Code sessions, and reads the dashboard. It leaves the laptop in Away.
+To test the settings without the tray, run `.\PowerProfiles.ps1 -SelfTest`. It applies both profiles, reads them back, samples the Claude Code sessions, and reads the dashboard. It leaves the laptop in Away. If the tray app runs, the self-test stops with an error. Use Exit in the tray menu first.
 
 ## Remove
 
 1. Run `.\Uninstall.ps1`.
 
-This removes the Startup shortcut and stops the app. It also puts back the four settings from before the install. Use `.\Uninstall.ps1 -KeepSettings` to keep the current settings.
+This removes the Startup shortcut and asks the app to stop. The app puts the Away values back before it stops. If the app does not stop in 20 seconds, the script stops it by force and shows a warning. Then the script puts back the four settings from before the install. Use `.\Uninstall.ps1 -KeepSettings` to keep the Away values.
 
-To put back only the settings, run `.\Restore-Baseline.ps1`. This script uses `powercfg` directly, so it works if the app does not.
+To put back only the settings, run `.\Restore-Baseline.ps1`. This script uses `powercfg` directly, so it works if the app does not. If `powercfg` fails, the script names each setting that it did not restore.
+
+The values in `Restore-Baseline.ps1` come from this laptop on 2026-10-01. They are not correct for a different computer.
 
 ## Files
 

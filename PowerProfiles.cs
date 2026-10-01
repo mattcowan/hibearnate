@@ -27,8 +27,14 @@ namespace WindowsPowerProfiles
         private static extern uint PowerWriteACValueIndex(IntPtr rootPowerKey, ref Guid schemeGuid, ref Guid subGroup, ref Guid setting, uint value);
         [DllImport("powrprof.dll")]
         private static extern uint PowerWriteDCValueIndex(IntPtr rootPowerKey, ref Guid schemeGuid, ref Guid subGroup, ref Guid setting, uint value);
+        // Returns BOOLEAN (1 byte), not BOOL (4 bytes); without I1 the upper bytes
+        // of the register are read too and a failure can look like success.
         [DllImport("powrprof.dll", SetLastError = true)]
-        private static extern bool SetSuspendState(bool hibernate, bool forceCritical, bool disableWakeEvent);
+        [return: MarshalAs(UnmanagedType.I1)]
+        private static extern bool SetSuspendState(
+            [MarshalAs(UnmanagedType.I1)] bool hibernate,
+            [MarshalAs(UnmanagedType.I1)] bool forceCritical,
+            [MarshalAs(UnmanagedType.I1)] bool disableWakeEvent);
         [DllImport("kernel32.dll")]
         private static extern IntPtr LocalFree(IntPtr mem);
         [DllImport("kernel32.dll")]
@@ -146,6 +152,7 @@ namespace WindowsPowerProfiles
         public const uint MOD_SHIFT = 0x4;
         private const uint MOD_NOREPEAT = 0x4000;
         private const int WM_HOTKEY = 0x0312;
+        private const int WM_ENDSESSION = 0x0016;
         private const int WM_POWERBROADCAST = 0x0218;
         private const int PBT_POWERSETTINGCHANGE = 0x8013;
         private const int HOTKEY_ID = 1;
@@ -160,6 +167,10 @@ namespace WindowsPowerProfiles
         public event EventHandler HotkeyPressed;
         public event EventHandler LidChanged;
         public event EventHandler DisplayChanged;
+
+        // Sign-out, restart or shutdown is in progress (WM_ENDSESSION with
+        // wParam TRUE). Handlers must finish fast; Windows does not wait long.
+        public event EventHandler SessionEnding;
 
         // Null until Windows sends the first lid notification (it sends one
         // right after registration on hardware that has a lid).
@@ -193,6 +204,10 @@ namespace WindowsPowerProfiles
             if (m.Msg == WM_HOTKEY && m.WParam.ToInt32() == HOTKEY_ID)
             {
                 Raise(HotkeyPressed);
+            }
+            else if (m.Msg == WM_ENDSESSION && m.WParam != IntPtr.Zero)
+            {
+                Raise(SessionEnding);
             }
             else if (m.Msg == WM_POWERBROADCAST && m.WParam.ToInt32() == PBT_POWERSETTINGCHANGE)
             {
@@ -254,8 +269,12 @@ namespace WindowsPowerProfiles
     }
 
     // Measures what each Claude Code session did between two calls. A session is
-    // one claude.exe that is not itself a child of another claude.exe, plus every
-    // process below it (tool commands, test runs, MCP servers).
+    // one Claude process that is not itself a child of another Claude process,
+    // plus every process below it (tool commands, test runs, MCP servers).
+    //
+    // A Claude process is either claude.exe (the native binary that the VS Code
+    // extension and the native installer use) or node.exe running the npm
+    // package's cli.js (what the `claude` command from `npm i -g` starts).
     //
     // A session counts as busy when either:
     //  - a process appeared in its tree since the last call. Idle sessions spawn
@@ -292,12 +311,23 @@ namespace WindowsPowerProfiles
         private static extern bool Process32Next(IntPtr snapshot, ref PROCESSENTRY32W entry);
         [DllImport("kernel32.dll")]
         private static extern bool CloseHandle(IntPtr handle);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr OpenProcess(uint access, bool inheritHandle, int processId);
+        [DllImport("ntdll.dll")]
+        private static extern int NtQueryInformationProcess(IntPtr process, int infoClass, IntPtr buffer, int length, out int returnLength);
 
         private const uint TH32CS_SNAPPROCESS = 0x2;
+        private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+        private const int ProcessCommandLineInformation = 60;  // Windows 8.1 and later
+        private const string NodeExe = "node.exe";
+        private const string NodeMarker = "claude-code/cli";   // matched after \ -> /
 
         private readonly string exeName;
         private Dictionary<int, double> lastCpu = new Dictionary<int, double>();
         private HashSet<int> lastSeen = new HashSet<int>();
+        // node.exe PID -> runs Claude Code. Reading a command line costs a
+        // handle and two syscalls, so each node.exe is checked once while it lives.
+        private Dictionary<int, bool> nodeIsClaude = new Dictionary<int, bool>();
         private bool primed;
 
         public ClaudeActivity(string exeName)
@@ -311,6 +341,7 @@ namespace WindowsPowerProfiles
             Dictionary<int, int> parentOf = new Dictionary<int, int>();
             Dictionary<int, string> nameOf = new Dictionary<int, string>();
             Snapshot(parentOf, nameOf);
+            ClassifyNodeProcesses(nameOf);
 
             Dictionary<int, List<int>> children = new Dictionary<int, List<int>>();
             foreach (KeyValuePair<int, int> pair in parentOf)
@@ -331,13 +362,12 @@ namespace WindowsPowerProfiles
 
             foreach (KeyValuePair<int, string> pair in nameOf)
             {
-                if (!IsClaude(pair.Value))
+                if (!IsClaude(pair.Key, nameOf))
                 {
                     continue;
                 }
                 int parent;
-                string parentName;
-                if (parentOf.TryGetValue(pair.Key, out parent) && nameOf.TryGetValue(parent, out parentName) && IsClaude(parentName))
+                if (parentOf.TryGetValue(pair.Key, out parent) && IsClaude(parent, nameOf))
                 {
                     continue; // counted as part of its parent session
                 }
@@ -401,9 +431,88 @@ namespace WindowsPowerProfiles
             return result;
         }
 
-        private bool IsClaude(string name)
+        private bool IsClaude(int pid, Dictionary<int, string> nameOf)
         {
-            return string.Equals(name, exeName, StringComparison.OrdinalIgnoreCase);
+            string name;
+            if (!nameOf.TryGetValue(pid, out name))
+            {
+                return false;
+            }
+            if (string.Equals(name, exeName, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+            bool isClaude;
+            return nodeIsClaude.TryGetValue(pid, out isClaude) && isClaude;
+        }
+
+        // Checks each node.exe not seen before, and forgets PIDs that exited so
+        // a reused PID is checked again.
+        private void ClassifyNodeProcesses(Dictionary<int, string> nameOf)
+        {
+            List<int> gone = new List<int>();
+            foreach (int pid in nodeIsClaude.Keys)
+            {
+                string name;
+                if (!nameOf.TryGetValue(pid, out name) || !string.Equals(name, NodeExe, StringComparison.OrdinalIgnoreCase))
+                {
+                    gone.Add(pid);
+                }
+            }
+            foreach (int pid in gone)
+            {
+                nodeIsClaude.Remove(pid);
+            }
+
+            foreach (KeyValuePair<int, string> pair in nameOf)
+            {
+                if (string.Equals(pair.Value, NodeExe, StringComparison.OrdinalIgnoreCase) && !nodeIsClaude.ContainsKey(pair.Key))
+                {
+                    string commandLine = CommandLine(pair.Key);
+                    nodeIsClaude[pair.Key] = commandLine != null &&
+                        commandLine.Replace('\\', '/').IndexOf(NodeMarker, StringComparison.OrdinalIgnoreCase) >= 0;
+                }
+            }
+        }
+
+        // Returns null if the process exited or denies access.
+        private static string CommandLine(int pid)
+        {
+            IntPtr process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+            if (process == IntPtr.Zero)
+            {
+                return null;
+            }
+            try
+            {
+                int length;
+                NtQueryInformationProcess(process, ProcessCommandLineInformation, IntPtr.Zero, 0, out length);
+                if (length <= 0)
+                {
+                    return null;
+                }
+                IntPtr buffer = Marshal.AllocHGlobal(length);
+                try
+                {
+                    if (NtQueryInformationProcess(process, ProcessCommandLineInformation, buffer, length, out length) != 0)
+                    {
+                        return null;
+                    }
+                    // UNICODE_STRING: USHORT Length (bytes), USHORT MaximumLength, then a
+                    // pointer aligned to pointer size; the text follows in the same buffer.
+                    int bytes = Marshal.ReadInt16(buffer) & 0xFFFF;
+                    IntPtr text = Marshal.ReadIntPtr(buffer, IntPtr.Size);
+                    return text == IntPtr.Zero ? null : Marshal.PtrToStringUni(text, bytes / 2);
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(buffer);
+                }
+            }
+            finally
+            {
+                CloseHandle(process);
+            }
         }
 
         private static double CpuMs(int pid)

@@ -6,6 +6,12 @@
 .DESCRIPTION
     Uses powercfg directly, so it works even if PowerProfiles.ps1 or its C#
     helper is broken. Does not need admin rights.
+
+    The values are this machine's, typed in from `powercfg /qh` output. They
+    are not right for a different machine. The DC "Hibernate after" value of
+    2147483647 is what this machine had; it means "never" in practice.
+
+    Exits with code 1 and names each failed setting if powercfg reports an error.
 #>
 
 $baseline = @(
@@ -16,10 +22,23 @@ $baseline = @(
     @('fea3413e-7e05-4911-9a71-700331f1c294', 'f15576e8-98b7-4186-b944-eafa664402d9', 1, 2, 'Network in standby: on AC, managed DC')
 )
 
+$failed = @()
 foreach ($b in $baseline) {
     powercfg /setacvalueindex SCHEME_CURRENT $b[0] $b[1] $b[2]
+    $acCode = $LASTEXITCODE
     powercfg /setdcvalueindex SCHEME_CURRENT $b[0] $b[1] $b[3]
-    "Restored $($b[4])"
+    $dcCode = $LASTEXITCODE
+    if ($acCode -ne 0 -or $dcCode -ne 0) {
+        $failed += "$($b[4]) (powercfg exit codes AC=$acCode DC=$dcCode)"
+    } else {
+        "Restored $($b[4])"
+    }
 }
 powercfg /setactive SCHEME_CURRENT
+if ($LASTEXITCODE -ne 0) { $failed += "Re-activate the scheme (powercfg exit code $LASTEXITCODE)" }
+
+if ($failed) {
+    Write-Warning ("Not restored:`n  " + ($failed -join "`n  "))
+    exit 1
+}
 'Done. Check with: powercfg /qh SCHEME_CURRENT'

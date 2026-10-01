@@ -13,6 +13,9 @@
 #>
 param([switch]$NoStart)
 
+# Stop at the first failure, so "Created" never prints after a failed Save().
+$ErrorActionPreference = 'Stop'
+
 $app = Join-Path $PSScriptRoot 'PowerProfiles.ps1'
 $shortcutPath = Join-Path ([Environment]::GetFolderPath('Startup')) 'Windows Power Profiles.lnk'
 $conhost = Join-Path $env:windir 'System32\conhost.exe'
@@ -28,6 +31,13 @@ $shortcut.Save()
 "Created $shortcutPath"
 
 if (-not $NoStart) {
-    Start-Process -FilePath $conhost -ArgumentList $arguments -WorkingDirectory $PSScriptRoot
-    'Started. Look for the green dot in the notification area.'
+    # A second copy exits at once, so say so rather than claim a start.
+    $running = Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" |
+        Where-Object { $_.CommandLine -like '*PowerProfiles.ps1*' -and $_.CommandLine -notlike '*-SelfTest*' -and $_.ProcessId -ne $PID }
+    if ($running) {
+        "The tray app is already running (pid $(@($running)[0].ProcessId)). Not started again."
+    } else {
+        Start-Process -FilePath $conhost -ArgumentList $arguments -WorkingDirectory $PSScriptRoot
+        'Started. Look for the green dot in the notification area.'
+    }
 }
