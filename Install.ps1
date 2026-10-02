@@ -16,8 +16,8 @@ param([switch]$NoStart)
 # Stop at the first failure, so "Created" never prints after a failed Save().
 $ErrorActionPreference = 'Stop'
 
-$app = Join-Path $PSScriptRoot 'PowerProfiles.ps1'
-$shortcutPath = Join-Path ([Environment]::GetFolderPath('Startup')) 'Windows Power Profiles.lnk'
+$app = Join-Path $PSScriptRoot 'Hibearnate.ps1'
+$shortcutPath = Join-Path ([Environment]::GetFolderPath('Startup')) 'Hibearnate.lnk'
 $conhost = Join-Path $env:windir 'System32\conhost.exe'
 $arguments = "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$app`""
 
@@ -26,18 +26,18 @@ $shortcut = $shell.CreateShortcut($shortcutPath)
 $shortcut.TargetPath = $conhost
 $shortcut.Arguments = $arguments
 $shortcut.WorkingDirectory = $PSScriptRoot
-$shortcut.Description = 'Power profiles tray app (Away / Keep Working / Auto) and Explorer restart hotkey'
+$shortcut.Description = 'Hibearnate: power profiles for Windows (Away / Keep Working / Auto) and an Explorer restart hotkey'
 $shortcut.Save()
 "Created $shortcutPath"
 
 if (-not $NoStart) {
     # A second copy exits at once, so say so rather than claim a start.
     $running = Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" |
-        Where-Object { $_.CommandLine -like '*PowerProfiles.ps1*' -and $_.CommandLine -notlike '*-SelfTest*' -and $_.ProcessId -ne $PID }
+        Where-Object { $_.CommandLine -like '*Hibearnate.ps1*' -and $_.CommandLine -notlike '*-SelfTest*' -and $_.ProcessId -ne $PID }
     if ($running) {
         "The tray app is already running (pid $(@($running)[0].ProcessId)). Not started again."
     } else {
         Start-Process -FilePath $conhost -ArgumentList $arguments -WorkingDirectory $PSScriptRoot
-        'Started. Look for the green dot in the notification area.'
+        'Started. Look for the green bear face in the notification area.'
     }
 }

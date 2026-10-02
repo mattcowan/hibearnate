@@ -17,18 +17,18 @@ param([switch]$KeepSettings)
 
 $ErrorActionPreference = 'Stop'
 
-$shortcutPath = Join-Path ([Environment]::GetFolderPath('Startup')) 'Windows Power Profiles.lnk'
+$shortcutPath = Join-Path ([Environment]::GetFolderPath('Startup')) 'Hibearnate.lnk'
 if (Test-Path $shortcutPath) {
     Remove-Item $shortcutPath
     "Removed $shortcutPath"
 }
 
 $running = @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" |
-    Where-Object { $_.CommandLine -like '*PowerProfiles.ps1*' -and $_.ProcessId -ne $PID })
+    Where-Object { $_.CommandLine -like '*Hibearnate.ps1*' -and $_.ProcessId -ne $PID })
 
 if ($running) {
     $exitEvent = $null
-    $asked = [System.Threading.EventWaitHandle]::TryOpenExisting('Local\WindowsPowerProfiles.Exit', [ref]$exitEvent)
+    $asked = [System.Threading.EventWaitHandle]::TryOpenExisting('Local\Hibearnate.Exit', [ref]$exitEvent)
     if ($asked) {
         [void]$exitEvent.Set()
         'Asked the tray app to exit (it checks every 10 seconds)...'

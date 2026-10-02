@@ -1,6 +1,8 @@
-# Windows Power Profiles
+# Hibearnate
 
-A tray app for a Windows laptop. It switches the power settings between "hibernate when I leave" and "stay awake while Claude Code works". It also restarts Explorer with one hotkey.
+Power profiles for Windows. A bear hibernates in winter and goes out to find food in spring. This laptop does the same: it hibernates when nobody uses it, and it stays awake while there is work.
+
+Hibearnate is a tray app for a Windows laptop. It switches the power settings between "hibernate when I leave" and "stay awake while Claude Code works". It also restarts Explorer with one hotkey.
 
 ## Why it exists
 
@@ -19,7 +21,7 @@ Hibernate stops all of this. But a long Claude Code task needs the laptop fully 
 
 1. Open PowerShell in this directory.
 2. Run `.\Install.ps1`.
-3. Look for a green dot in the notification area.
+3. Look for a green bear face in the notification area.
 
 `Install.ps1` puts a shortcut in the Startup folder, so the app starts at every login. The shortcut runs PowerShell through `conhost.exe --headless`, so no console window opens. Use `.\Install.ps1 -NoStart` to add the shortcut without a start now.
 
@@ -41,9 +43,9 @@ The app always starts in Away. Keep Working and Auto last only until the next lo
 
 The tooltip shows the mode in words. The icon also shows the mode:
 
-- Green dot: Away.
-- Orange dot: Keep Working.
-- A white ring inside the dot: Auto.
+- Green bear with closed eyes: Away. The bear sleeps, so the laptop hibernates when you leave.
+- Orange bear with open eyes: Keep Working.
+- A white badge in the lower right corner: Auto.
 
 ### When Keep Working ends
 
@@ -105,19 +107,19 @@ The Keep Working values for the lid and for sleep stay in the power plan after t
 
 If something stops the app by force in Keep Working, the lid stays ignored. This includes Task Manager and a crash of PowerShell itself. The next start of the app puts Away back, and the app starts at each login. To fix it at once, start the app again or run `.\Restore-Baseline.ps1`.
 
-The app reads and writes the settings through the `powrprof` API in `PowerProfiles.cs`. It does not parse the output of `powercfg`. On this laptop, `powercfg /query` hides the lid close action, and only `powercfg /qh` shows it. The API sees hidden settings, and it does not depend on the display language.
+The app reads and writes the settings through the `powrprof` API in `Hibearnate.cs`. It does not parse the output of `powercfg`. On this laptop, `powercfg /query` hides the lid close action, and only `powercfg /qh` shows it. The API sees hidden settings, and it does not depend on the display language.
 
 After each change, the app reads every value back. If a value did not change, the app writes a warning to the log and shows a notification.
 
-The log is at `%LOCALAPPDATA%\WindowsPowerProfiles\power-profiles.log`. When the log is larger than 1 MB, the app renames it to `power-profiles.log.old` and starts a new one.
+The log is at `%LOCALAPPDATA%\Hibearnate\power-profiles.log`. When the log is larger than 1 MB, the app renames it to `power-profiles.log.old` and starts a new one.
 
 ## Configure
 
-Change the values in the `$Config` block at the top of `PowerProfiles.ps1`. Then use Exit in the tray menu and start the app again.
+Change the values in the `$Config` block at the top of `Hibearnate.ps1`. Then use Exit in the tray menu and start the app again.
 
 To tune Auto, start the app with `-TraceAuto`. The app then writes the Auto inputs to the log at every check.
 
-To test the settings without the tray, run `.\PowerProfiles.ps1 -SelfTest`. It applies both profiles, reads them back, samples the Claude Code sessions, and reads the dashboard. It leaves the laptop in Away. If the tray app runs, the self-test stops with an error. Use Exit in the tray menu first.
+To test the settings without the tray, run `.\Hibearnate.ps1 -SelfTest`. It applies both profiles, reads them back, samples the Claude Code sessions, and reads the dashboard. It leaves the laptop in Away. If the tray app runs, the self-test stops with an error. Use Exit in the tray menu first.
 
 ## Remove
 
@@ -133,8 +135,8 @@ The values in `Restore-Baseline.ps1` come from this laptop on 2026-10-01. They a
 
 | File | Purpose |
 | --- | --- |
-| `PowerProfiles.ps1` | The tray app. |
-| `PowerProfiles.cs` | Native helpers: power settings, hotkey, lid and display events, Claude Code activity. |
+| `Hibearnate.ps1` | The tray app. |
+| `Hibearnate.cs` | Native helpers: power settings, hotkey, lid and display events, Claude Code activity. |
 | `Install.ps1` | Adds the Startup shortcut and starts the app. |
 | `Uninstall.ps1` | Removes the shortcut, stops the app, and restores the settings. |
 | `Restore-Baseline.ps1` | Puts back the settings recorded on 2026-10-01, before the install. |

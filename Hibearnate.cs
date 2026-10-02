@@ -1,4 +1,4 @@
-// Native helpers for PowerProfiles.ps1. Compiled at launch with Add-Type, so this
+// Native helpers for Hibearnate.ps1. Compiled at launch with Add-Type, so this
 // file stays within C# 5 (the compiler that ships with Windows PowerShell 5.1).
 
 using System;
@@ -8,7 +8,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
-namespace WindowsPowerProfiles
+namespace Hibearnate
 {
     // Reads and writes power settings on the active scheme through the powrprof
     // API. Unlike `powercfg /query`, this sees settings Windows marks hidden (the

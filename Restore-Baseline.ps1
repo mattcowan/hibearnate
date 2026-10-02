@@ -4,7 +4,7 @@
     on this machine on 2026-10-01, before the tool was installed.
 
 .DESCRIPTION
-    Uses powercfg directly, so it works even if PowerProfiles.ps1 or its C#
+    Uses powercfg directly, so it works even if Hibearnate.ps1 or its C#
     helper is broken. Does not need admin rights.
 
     The values are this machine's, typed in from `powercfg /qh` output. They
