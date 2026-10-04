@@ -52,14 +52,17 @@ $Config = @{
     AutoQuietMinutes        = 10       # Auto waits this long with no busy signal before Away
     ClaudeBusyCpuMs         = 2000     # CPU per poll (10 s) that marks a session tree busy;
                                        # idle trees measured at up to about 1000
+    # Optional: a claude-status-dashboard board (github.com/mattcowan/claude-status-dashboard).
+    # Set to $null to turn the dashboard signal off; Auto then uses the process checks only.
     DashboardUrl            = 'http://127.0.0.1:4787/api/board'
     DashboardFreshHours     = 6        # ignore Working cards with no activity for longer
     HibernateIdleLidClosed  = 2        # minutes idle before hibernating with the lid closed
     HibernateIdleLidOpen    = 10       # minutes idle before hibernating with the lid open
-    BatteryFloorPercent     = 15       # Keep Working hibernates on battery below this
+    BatteryFloorPercent     = 15       # at or below this on battery, Keep Working ends (Away, then idle hibernate)
     LogDir                  = Join-Path $env:LOCALAPPDATA 'Hibearnate'
 }
 $LogPath = Join-Path $Config.LogDir 'power-profiles.log'
+$BaselinePath = Join-Path $Config.LogDir 'baseline.json'
 
 $SUB_BUTTONS = [guid]'4f971e89-eebd-4455-a8de-9e59040e7347'
 $SUB_SLEEP   = [guid]'238c9fa8-0aad-41ed-83f4-97be242c8f20'
@@ -120,6 +123,27 @@ function Format-Minutes([int]$Minutes) {
 
 # Writes a profile, re-activates the scheme, and reads every value back.
 # Returns the names of settings that did not take, so callers can report them.
+# Records the settings this app changes, as they were before its first run, so
+# Restore-Baseline.ps1 can put them back on any machine. Never overwrites an
+# existing file: a later run would record the app's own Away values instead.
+# Each entry carries its own GUIDs and the plan it came from, so the restore
+# script needs neither this file's tables nor the C# helper.
+function Save-Baseline {
+    if (Test-Path $BaselinePath) { return }
+    $scheme = [Hibearnate.PowerSettings]::ActiveScheme()
+    $entries = foreach ($key in $Settings.Keys) {
+        $s = $Settings[$key]
+        $v = [Hibearnate.PowerSettings]::Read($s.Sub, $s.Id)
+        [ordered]@{ Name = $key; Subgroup = "$($s.Sub)"; Setting = "$($s.Id)"; AC = $v[0]; DC = $v[1] }
+    }
+    if (-not (Test-Path $Config.LogDir)) {
+        New-Item -ItemType Directory -Path $Config.LogDir -Force | Out-Null
+    }
+    [ordered]@{ RecordedAt = (Get-Date).ToString('s'); Scheme = "$scheme"; Settings = @($entries) } |
+        ConvertTo-Json -Depth 4 | Set-Content -Path $BaselinePath -Encoding UTF8
+    Write-Log "Baseline recorded: $BaselinePath"
+}
+
 function Set-PowerProfile([string]$Name) {
     $wanted = $Profiles[$Name]
     foreach ($key in $wanted.Keys) {
@@ -141,6 +165,7 @@ function Set-PowerProfile([string]$Name) {
 }
 
 function Get-DashboardWorking {
+    if (-not $Config.DashboardUrl) { return -1 }  # signal turned off
     try {
         $board = Invoke-RestMethod -Uri $Config.DashboardUrl -TimeoutSec 2
         $fresh = (Get-Date).ToUniversalTime().AddHours(-$Config.DashboardFreshHours)
@@ -185,6 +210,7 @@ if (-not $owned) {
 
 if ($SelfTest) {
     try {
+        Save-Baseline  # the self-test writes settings too
         'Settings before:'
         foreach ($key in $Settings.Keys) {
             $v = [Hibearnate.PowerSettings]::Read($Settings[$key].Sub, $Settings[$key].Id)
@@ -236,9 +262,11 @@ $State.LastDisplayOn = $null
 
 # ---------------------------------------------------------------- tray icon
 
-# A bear face. The eyes carry the mode, so it reads without color:
-# closed (sleeping) = Away, open = Keep Working. Auto adds a white badge in
-# the lower right corner. Drawn at 32 px; Windows scales it for the tray.
+# A bear face. Green = Away, red = Keep Working, orange = Auto, so switching
+# Keep Working to Auto visibly changes the icon even while Auto keeps the
+# machine awake. The eyes show what is applied right now: closed (sleeping)
+# = the Away settings, open = staying awake. Auto also adds a white badge, so
+# the mode never depends on color alone. Drawn at 32 px; Windows scales it.
 function New-BearIcon([System.Drawing.Color]$Fur, [bool]$Awake, [bool]$Auto) {
     $bmp = New-Object System.Drawing.Bitmap 32, 32
     $g = [System.Drawing.Graphics]::FromImage($bmp)
@@ -273,8 +301,8 @@ function New-BearIcon([System.Drawing.Color]$Fur, [bool]$Awake, [bool]$Auto) {
 $Icons = @{
     Away            = New-BearIcon ([System.Drawing.Color]::SeaGreen) $false $false
     KeepWorking     = New-BearIcon ([System.Drawing.Color]::OrangeRed) $true $false
-    AutoAway        = New-BearIcon ([System.Drawing.Color]::SeaGreen) $false $true
-    AutoKeepWorking = New-BearIcon ([System.Drawing.Color]::OrangeRed) $true $true
+    AutoAway        = New-BearIcon ([System.Drawing.Color]::Orange) $false $true
+    AutoKeepWorking = New-BearIcon ([System.Drawing.Color]::Orange) $true $true
 }
 
 $Tray = New-Object System.Windows.Forms.NotifyIcon
@@ -627,6 +655,13 @@ $Timer.add_Tick({ try { Invoke-Poll } catch { Write-Log "ERROR in poll: $_" } })
 
 $null = $Activity.Sample($Config.ClaudeBusyCpuMs)  # baseline for the first Auto poll
 Write-Log "Started (pid $PID)"
+try {
+    Save-Baseline
+} catch {
+    # Keep going: Away is the safe state. Only Uninstall loses the originals.
+    Write-Log "WARNING: could not record the baseline: $_"
+    Show-Note 'Could not record the original power settings. See the log.'
+}
 Set-Effective 'Away' 'launch'
 Update-Tray
 $Timer.Start()

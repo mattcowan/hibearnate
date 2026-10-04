@@ -25,5 +25,5 @@ A Windows tray app (`Hibearnate.ps1` plus the C# helper `Hibearnate.cs`) that sw
 ## Review notes
 
 - The review runner is Linux, so nothing here can be executed in CI. Review by reading. On a Windows machine, `.\Hibearnate.ps1 -SelfTest` round-trips both profiles (exit the tray first; the self-test refuses while it runs).
-- `Restore-Baseline.ps1` holds one laptop's recorded values on purpose; do not flag them as hardcoded.
+- The original settings live in `%LOCALAPPDATA%\Hibearnate\baseline.json`, written by `Save-Baseline` on the first start and never overwritten (a later write would record the app's own Away values). `Restore-Baseline.ps1` reads it with `powercfg` and refuses to write anything when it is missing. Keep both properties.
 - `readme.md` is written in ASD-STE100 Simplified Technical English with American spelling. Code comments are plain technical English.

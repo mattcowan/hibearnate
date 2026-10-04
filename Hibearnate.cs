@@ -51,6 +51,12 @@ namespace Hibearnate
             }
         }
 
+        // The power plan that Read, Write and Commit act on.
+        public static Guid ActiveScheme()
+        {
+            return GetActiveScheme();
+        }
+
         private static Guid GetActiveScheme()
         {
             IntPtr ptr;
