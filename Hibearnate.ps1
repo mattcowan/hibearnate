@@ -250,6 +250,7 @@ $State = @{
     Mode            = 'Away'      # Away | KeepWorking | Auto
     Effective       = 'Away'      # profile actually applied: Away | KeepWorking
     KeepUntil       = $null       # [datetime] for timed Keep Working
+    KeepMinutes     = 0           # the Keep Working choice, so the menu can mark it (0 = until switched back)
     AutoAwakeSince  = $null       # start of the current Auto keep-awake stretch
     AutoLastBusy    = $null       # last poll with a busy signal
     AutoCapped      = $false      # cap reached; stays Away until signals go quiet
@@ -259,6 +260,8 @@ $State = @{
 
 $Activity = New-Object Hibearnate.ClaudeActivity 'claude.exe'
 $State.LastDisplayOn = $null
+$State.LastPoll = $null      # time of the last poll, to spot a wake
+$State.LastResume = $null    # time of the last wake, caps the idle time
 
 # ---------------------------------------------------------------- tray icon
 
@@ -335,6 +338,14 @@ function Update-Tray {
 
     $MenuAway.Checked = $State.Mode -eq 'Away'
     $MenuKeep.Checked = $State.Mode -eq 'KeepWorking'
+    # Show the chosen duration: a check on its submenu item, and the time left
+    # on the parent item, so the open menu answers "which one did I pick?".
+    foreach ($item in $MenuKeep.DropDownItems) {
+        $item.Checked = $State.Mode -eq 'KeepWorking' -and [int]$item.Tag -eq $State.KeepMinutes
+    }
+    $MenuKeep.Text = if ($State.Mode -ne 'KeepWorking') { 'Keep Working' }
+        elseif ($State.KeepUntil) { 'Keep Working ({0} left)' -f (Format-Span ($State.KeepUntil - (Get-Date))) }
+        else { 'Keep Working (until switched back)' }
     $MenuAuto.Checked = $State.Mode -eq 'Auto'
 }
 
@@ -365,6 +376,7 @@ function Enter-Away([string]$Why) {
 function Enter-KeepWorking([int]$Minutes) {
     $State.Mode = 'KeepWorking'
     $State.KeepUntil = if ($Minutes -gt 0) { (Get-Date).AddMinutes($Minutes) } else { $null }
+    $State.KeepMinutes = $Minutes
     $State.PendingHibernate = $false
     Set-Effective 'KeepWorking' "manual, $(Format-Minutes $Minutes)"
     Update-Tray
@@ -416,14 +428,30 @@ function Invoke-Hibernate([string]$Why) {
     }
 }
 
+# Time since the last keyboard or mouse input, but never more than the time
+# since the last wake. GetLastInputInfo keeps counting through a hibernate or
+# standby, so right after a wake it reports the whole time the machine was off
+# (seen: "idle 4h 25m" one second after the lid opened), and the lid state can
+# still say "closed" until Windows sends the lid-open notice.
+function Get-EffectiveIdle {
+    $idle = [Hibearnate.UserIdle]::Get()
+    if ($State.LastResume) {
+        $sinceWake = (Get-Date) - $State.LastResume
+        if ($sinceWake -lt $idle) { return $sinceWake }
+    }
+    return $idle
+}
+
 function Test-PendingHibernate {
     if (-not $State.PendingHibernate -or $State.Effective -ne 'Away') { return }
-    $idle = [Hibearnate.UserIdle]::Get()
+    $idle = Get-EffectiveIdle
     $lidClosed = $Window.LidOpen -eq $false
     if ($idle.TotalSeconds -lt 60) {
-        # Someone is at the keyboard (for example docked with the lid shut).
+        # Someone is at the keyboard (for example docked with the lid shut), or
+        # the machine just woke. After a wake with nobody there, the Away
+        # timers still put it into standby and then hibernate.
         $State.PendingHibernate = $false
-        Write-Log 'Pending hibernate canceled: user active'
+        Write-Log 'Pending hibernate canceled: user active or just woke'
     } elseif ($lidClosed -and $idle.TotalMinutes -ge $Config.HibernateIdleLidClosed) {
         Invoke-Hibernate "work ended, lid closed, idle $(Format-Span $idle)"
     } elseif ($idle.TotalMinutes -ge $Config.HibernateIdleLidOpen) {
@@ -508,6 +536,16 @@ function Invoke-Poll {
         Stop-App 'exit requested by Uninstall.ps1'
         return
     }
+    # The poll timer does not run while the machine hibernates or sits in
+    # standby (Windows pauses desktop apps there), so a long gap since the last
+    # poll means the machine just woke. Note it before anything below decides
+    # on idle time.
+    $now = Get-Date
+    if ($State.LastPoll -and ($now - $State.LastPoll).TotalSeconds -gt 3 * $Config.PollSeconds) {
+        $State.LastResume = $now
+        Write-Log "Woke after $(Format-Span ($now - $State.LastPoll)) without a poll"
+    }
+    $State.LastPoll = $now
     if ($State.Mode -eq 'KeepWorking' -and $State.KeepUntil -and (Get-Date) -ge $State.KeepUntil) {
         Enter-Away 'timer ended'
         Complete-Work 'Keep Working time ended'
@@ -603,6 +641,7 @@ $MenuExit.add_Click({ Stop-App 'menu' })
     $MenuExit
 ))
 $Tray.ContextMenuStrip = $Menu
+$Menu.add_Opening({ try { Update-Tray } catch { Write-Log "ERROR: $_" } })  # fresh "time left" when the menu opens
 
 # Left click opens the same menu as right click. NotifyIcon only exposes this
 # through a private method.

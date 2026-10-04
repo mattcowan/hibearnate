@@ -43,6 +43,8 @@ Click the tray icon with the left or the right mouse button to open the menu.
 
 The app always starts in Away. Keep Working and Auto last only until the next login.
 
+In Keep Working, the menu marks the time that you chose, and the Keep Working item shows the time that is left.
+
 The tooltip shows the mode in words. The icon also shows the mode:
 
 - Green bear with closed eyes: Away. The bear sleeps, so the laptop hibernates when you leave.
@@ -58,6 +60,7 @@ When the timer ends, the app goes back to Away. When Auto sees that the work is 
 - If the lid is closed, the app hibernates after 2 minutes with no keyboard or mouse input.
 - If the lid is open, the app hibernates after 10 minutes with no input.
 - If somebody uses the keyboard or the mouse first, the app cancels the hibernate. This prevents a hibernate when the lid is closed on a dock.
+- If the laptop wakes from hibernate or standby, the app does not hibernate it again at once. The Away timers apply instead.
 
 On battery, the charge can fall to 15% or less in Keep Working. Then the app goes back to Away and hibernates the laptop with the same idle rules. Auto does not go back to Keep Working while the charge stays at 15% or less. Windows also hibernates the laptop at 2% by itself.
 
