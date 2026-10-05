@@ -33,8 +33,13 @@ try {
     $baseline = Get-Content -Path $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     $guid = [guid]::Empty
     if (-not [guid]::TryParse([string]$baseline.Scheme, [ref]$guid)) { $problem = 'no valid power plan GUID' }
-    elseif (@($baseline.Settings).Count -eq 0) { $problem = 'no settings' }
     else {
+        # The four settings Hibearnate changes (the $Settings keys in Hibearnate.ps1).
+        $names = @($baseline.Settings | ForEach-Object { $_.Name })
+        $missing = @('LidAction', 'SleepAfter', 'HibernateAfter', 'StandbyNetwork') | Where-Object { $names -notcontains $_ }
+        if ($missing) { $problem = 'missing setting(s): ' + ($missing -join ', ') }
+    }
+    if (-not $problem) {
         foreach ($s in $baseline.Settings) {
             if (-not [guid]::TryParse([string]$s.Subgroup, [ref]$guid) -or -not [guid]::TryParse([string]$s.Setting, [ref]$guid) -or
                 $s.AC -isnot [ValueType] -or $s.DC -isnot [ValueType]) {
@@ -75,3 +80,5 @@ if ($failed) {
     exit 1
 }
 'Done. Check with: powercfg /qh SCHEME_CURRENT'
+# Explicit, because Uninstall.ps1 deletes the record only on exit code 0.
+exit 0

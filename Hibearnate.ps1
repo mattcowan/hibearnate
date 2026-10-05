@@ -121,8 +121,6 @@ function Format-Minutes([int]$Minutes) {
     return '{0} hours' -f ($Minutes / 60)
 }
 
-# Writes a profile, re-activates the scheme, and reads every value back.
-# Returns the names of settings that did not take, so callers can report them.
 # Records the settings this app changes, as they were before its first run, so
 # Restore-Baseline.ps1 can put them back on any machine. Never overwrites an
 # existing file: a later run would record the app's own Away values instead.
@@ -182,6 +180,8 @@ function Test-BaselineFile([string]$Path) {
     }
 }
 
+# Writes a profile, re-activates the scheme, and reads every value back.
+# Returns the names of settings that did not take, so callers can report them.
 function Set-PowerProfile([string]$Name) {
     $wanted = $Profiles[$Name]
     foreach ($key in $wanted.Keys) {
@@ -299,7 +299,7 @@ $State = @{
 $Activity = New-Object Hibearnate.ClaudeActivity 'claude.exe'
 $State.LastDisplayOn = $null
 $State.NoBaseline = $false   # true while the originals could not be recorded (no setting is changed)
-$State.LastPoll = $null      # time of the last poll, to spot a wake
+$State.LastPoll = $null      # time of the last wake check (poll or lid event), to spot a wake
 $State.LastResume = $null    # time of the last wake, caps the idle time
 
 # ---------------------------------------------------------------- tray icon
@@ -579,21 +579,30 @@ function Test-Battery {
     Complete-Work "Battery at $percent%"
 }
 
+# The poll timer does not run while the machine hibernates or sits in standby
+# (Windows pauses desktop apps there), so a long gap since the last check means
+# the machine just woke. Called before anything decides on idle time: by every
+# poll, and by the lid handler, whose lid-closed notice can arrive before the
+# first poll after a wake.
+#
+# The 3-poll threshold is a heuristic. A UI-thread stall longer than that also
+# counts as a wake. That fails safe: the only effect is that one pending
+# hibernate is canceled and the Away timers apply instead.
+function Update-WakeState {
+    $now = Get-Date
+    if ($State.LastPoll -and ($now - $State.LastPoll).TotalSeconds -gt 3 * $Config.PollSeconds) {
+        $State.LastResume = $now
+        Write-Log "Woke after $(Format-Span ($now - $State.LastPoll)) without a check"
+    }
+    $State.LastPoll = $now
+}
+
 function Invoke-Poll {
     if ($ExitEvent.WaitOne(0)) {
         Stop-App 'exit requested by Uninstall.ps1'
         return
     }
-    # The poll timer does not run while the machine hibernates or sits in
-    # standby (Windows pauses desktop apps there), so a long gap since the last
-    # poll means the machine just woke. Note it before anything below decides
-    # on idle time.
-    $now = Get-Date
-    if ($State.LastPoll -and ($now - $State.LastPoll).TotalSeconds -gt 3 * $Config.PollSeconds) {
-        $State.LastResume = $now
-        Write-Log "Woke after $(Format-Span ($now - $State.LastPoll)) without a poll"
-    }
-    $State.LastPoll = $now
+    Update-WakeState
     if ($State.NoBaseline) {
         try {
             Save-Baseline
@@ -721,6 +730,7 @@ $Window.add_HotkeyPressed({ try { Restart-Explorer } catch { Write-Log "ERROR: $
 $Window.add_LidChanged({
     try {
         Write-Log $(if ($Window.LidOpen) { 'Lid opened' } else { 'Lid closed' })
+        Update-WakeState
         if ($Window.LidOpen) { $State.PendingHibernate = $false } else { Test-PendingHibernate }
     } catch { Write-Log "ERROR: $_" }
 })
