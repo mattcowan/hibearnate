@@ -8,6 +8,11 @@
 # app token exchange rejects a workflow that differs from it. So @claude
 # does nothing on the PR that adds or changes this file until it is merged.
 #
+# Only the owner can start a run. Before writing @claude on a pull request
+# from a fork, read the change first: Claude then reads code that someone else
+# wrote, and text in it can try to steer the review. The token is read-only,
+# which limits what a steered run can do, but its comments still post as Claude.
+#
 # Setup, one time:
 #   1. Run `claude setup-token` (works on Pro and Max) and copy the token.
 #   2. Add it as the repo secret CLAUDE_CODE_OAUTH_TOKEN:

@@ -1,10 +1,14 @@
-# Windows Power Profiles
+# Hibearnate
 
-A tray app for a Windows laptop. It switches the power settings between "hibernate when I leave" and "stay awake while Claude Code works". It also restarts Explorer with one hotkey.
+Power profiles for Windows. A bear hibernates in winter and goes out to find food in spring. Hibearnate makes a Windows laptop do the same: the laptop hibernates when nobody uses it, and it stays awake while there is work.
+
+Hibearnate is a tray app for a Windows laptop. It switches the power settings between "hibernate when I leave" and "stay awake while Claude Code works". It also restarts Explorer with one hotkey.
 
 ## Why it exists
 
-This laptop has no classic sleep (S3). Its only sleep state is Modern Standby, which keeps the system partly awake. On AC power, the old settings put the laptop in standby after 60 minutes and never moved it to hibernate. The network stayed on in standby. Background work continued, the fan ran, and the laptop was slow after it woke.
+Many Windows laptops have no classic sleep (S3). Their only sleep state is Modern Standby, which keeps the system partly awake. To find out if a laptop uses it, run `powercfg /a` and look for "Standby (S0 Low Power Idle)".
+
+On the laptop where this app started, standby began after 60 minutes on AC power and never moved to hibernate. The network stayed on in standby. Background work continued, the fan ran, and the laptop was slow after it woke.
 
 Hibernate stops all of this. But a long Claude Code task needs the laptop fully awake, even with the lid closed. This app gives one click for each case, plus an Auto mode that follows the Claude Code sessions.
 
@@ -19,7 +23,7 @@ Hibernate stops all of this. But a long Claude Code task needs the laptop fully 
 
 1. Open PowerShell in this directory.
 2. Run `.\Install.ps1`.
-3. Look for a green dot in the notification area.
+3. Look for a green bear face in the notification area.
 
 `Install.ps1` puts a shortcut in the Startup folder, so the app starts at every login. The shortcut runs PowerShell through `conhost.exe --headless`, so no console window opens. Use `.\Install.ps1 -NoStart` to add the shortcut without a start now.
 
@@ -39,11 +43,15 @@ Click the tray icon with the left or the right mouse button to open the menu.
 
 The app always starts in Away. Keep Working and Auto last only until the next login.
 
+In Keep Working, the menu marks the time that you chose, and the Keep Working item shows the time that is left.
+
 The tooltip shows the mode in words. The icon also shows the mode:
 
-- Green dot: Away.
-- Orange dot: Keep Working.
-- A white ring inside the dot: Auto.
+- Green bear with closed eyes: Away. The bear sleeps, so the laptop hibernates when you leave.
+- Red bear with open eyes: Keep Working.
+- Orange bear: Auto. Its eyes are closed while Auto applies the Away settings, and open while Auto keeps the laptop awake.
+
+A white badge in the lower right corner also marks Auto, so you can tell the modes apart without color.
 
 ### When Keep Working ends
 
@@ -52,6 +60,7 @@ When the timer ends, the app goes back to Away. When Auto sees that the work is 
 - If the lid is closed, the app hibernates after 2 minutes with no keyboard or mouse input.
 - If the lid is open, the app hibernates after 10 minutes with no input.
 - If somebody uses the keyboard or the mouse first, the app cancels the hibernate. This prevents a hibernate when the lid is closed on a dock.
+- If the laptop wakes from hibernate or standby, the app does not hibernate it again at once. The Away timers apply instead.
 
 On battery, the charge can fall to 15% or less in Keep Working. Then the app goes back to Away and hibernates the laptop with the same idle rules. Auto does not go back to Keep Working while the charge stays at 15% or less. Windows also hibernates the laptop at 2% by itself.
 
@@ -59,7 +68,7 @@ On battery, the charge can fall to 15% or less in Keep Working. Then the app goe
 
 Auto checks every 10 seconds. A session is busy if one of these is true:
 
-- The status dashboard at `http://127.0.0.1:4787` has a card in the Working column with activity in the last 6 hours.
+- Optional: a [claude-status-dashboard](https://github.com/mattcowan/claude-status-dashboard) board at `http://127.0.0.1:4787` has a card in the Working column with activity in the last 6 hours. If no dashboard runs, Auto uses the other two signals. To turn this signal off, set `DashboardUrl` to `$null` in `$Config`.
 - The process tree of a Claude session started a new process since the last check. A session that runs tools starts `bash`, `git`, and similar processes all the time. A quiet session starts none.
 - The process tree of a Claude session used 2 seconds of CPU in the last 10 seconds. This catches a long build or test run.
 
@@ -87,12 +96,14 @@ Each restart writes a line to the log. The line gives the Explorer uptime and me
 
 The app changes four settings on the active power plan. It changes the AC value and the DC value together.
 
-| Setting | Away | Keep Working | Before install |
+| Setting | Away | Keep Working | Example: before install |
 | --- | --- | --- | --- |
 | Lid close action | Hibernate | Do nothing | Hibernate |
 | Sleep after | 15 min AC, 5 min DC | Never | 60 min AC, 5 min DC |
 | Hibernate after standby | 20 min | 20 min | Never |
 | Network in standby | Off | Off | On AC, managed DC |
+
+The last column shows the values on the laptop where this app started. They are different on other laptops. The app records the real values on its first start (see [Remove](#remove)).
 
 In Keep Working, the app also holds a "system required" request. This request stops idle sleep. Windows removes the request when the app stops.
 
@@ -105,36 +116,41 @@ The Keep Working values for the lid and for sleep stay in the power plan after t
 
 If something stops the app by force in Keep Working, the lid stays ignored. This includes Task Manager and a crash of PowerShell itself. The next start of the app puts Away back, and the app starts at each login. To fix it at once, start the app again or run `.\Restore-Baseline.ps1`.
 
-The app reads and writes the settings through the `powrprof` API in `PowerProfiles.cs`. It does not parse the output of `powercfg`. On this laptop, `powercfg /query` hides the lid close action, and only `powercfg /qh` shows it. The API sees hidden settings, and it does not depend on the display language.
+The app reads and writes the settings through the `powrprof` API in `Hibearnate.cs`. It does not parse the output of `powercfg`. On some laptops, `powercfg /query` hides the lid close action, and only `powercfg /qh` shows it. The API sees hidden settings, and it does not depend on the display language.
 
 After each change, the app reads every value back. If a value did not change, the app writes a warning to the log and shows a notification.
 
-The log is at `%LOCALAPPDATA%\WindowsPowerProfiles\power-profiles.log`. When the log is larger than 1 MB, the app renames it to `power-profiles.log.old` and starts a new one.
+The log is at `%LOCALAPPDATA%\Hibearnate\power-profiles.log`. When the log is larger than 1 MB, the app renames it to `power-profiles.log.old` and starts a new one.
 
 ## Configure
 
-Change the values in the `$Config` block at the top of `PowerProfiles.ps1`. Then use Exit in the tray menu and start the app again.
+Change the values in the `$Config` block at the top of `Hibearnate.ps1`. Then use Exit in the tray menu and start the app again.
 
 To tune Auto, start the app with `-TraceAuto`. The app then writes the Auto inputs to the log at every check.
 
-To test the settings without the tray, run `.\PowerProfiles.ps1 -SelfTest`. It applies both profiles, reads them back, samples the Claude Code sessions, and reads the dashboard. It leaves the laptop in Away. If the tray app runs, the self-test stops with an error. Use Exit in the tray menu first.
+To test the settings without the tray, run `.\Hibearnate.ps1 -SelfTest`. It applies both profiles, reads them back, samples the Claude Code sessions, and reads the dashboard. It leaves the laptop in Away. If the tray app runs, the self-test stops with an error. Use Exit in the tray menu first.
 
 ## Remove
 
 1. Run `.\Uninstall.ps1`.
 
-This removes the Startup shortcut and asks the app to stop. The app puts the Away values back before it stops. If the app does not stop in 20 seconds, the script stops it by force and shows a warning. Then the script puts back the four settings from before the install. Use `.\Uninstall.ps1 -KeepSettings` to keep the Away values.
+This removes the Startup shortcut and asks the app to stop. The app puts the Away values back before it stops. If the app does not stop in 20 seconds, the script stops it by force and shows a warning. Then the script puts back the settings that the app recorded before its first start, and removes the record. Use `.\Uninstall.ps1 -KeepSettings` to keep the Away values and the record.
 
 To put back only the settings, run `.\Restore-Baseline.ps1`. This script uses `powercfg` directly, so it works if the app does not. If `powercfg` fails, the script names each setting that it did not restore.
 
-The values in `Restore-Baseline.ps1` come from this laptop on 2026-10-01. They are not correct for a different computer.
+The app records the original values to `%LOCALAPPDATA%\Hibearnate\baseline.json` the first time it starts, before it changes a setting. The app writes the file completely or not at all, and it never overwrites the file. If the file does not exist or is damaged, `Restore-Baseline.ps1` changes nothing and shows a warning. If the app finds a damaged file when it starts, it shows a notification. If the app cannot write the file, it changes no setting and shows a notification. It tries again every 10 seconds, and it applies Away when the file is written.
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
-| `PowerProfiles.ps1` | The tray app. |
-| `PowerProfiles.cs` | Native helpers: power settings, hotkey, lid and display events, Claude Code activity. |
+| `Hibearnate.ps1` | The tray app. |
+| `Hibearnate.cs` | Native helpers: power settings, hotkey, lid and display events, Claude Code activity. |
 | `Install.ps1` | Adds the Startup shortcut and starts the app. |
 | `Uninstall.ps1` | Removes the shortcut, stops the app, and restores the settings. |
-| `Restore-Baseline.ps1` | Puts back the settings recorded on 2026-10-01, before the install. |
+| `Restore-Baseline.ps1` | Puts back the settings that the app recorded before its first start. |
+| `LICENSE` | The MIT License. |
+
+## License
+
+Hibearnate is available under the [MIT License](LICENSE).

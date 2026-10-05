@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
     Stops the tray app, removes it from Startup, and restores the power
-    settings recorded before install.
+    settings recorded before its first run (see Restore-Baseline.ps1).
 
 .DESCRIPTION
     Asks the tray app to exit through a named event, so it puts the Away
@@ -11,24 +11,25 @@
     then overwrites (unless -KeepSettings is given).
 
 .PARAMETER KeepSettings
-    Do not restore the baseline. After a clean exit, the Away settings stay.
+    Do not restore the baseline. After a clean exit, the Away settings stay,
+    and the baseline file stays for a later Restore-Baseline.ps1 run.
 #>
 param([switch]$KeepSettings)
 
 $ErrorActionPreference = 'Stop'
 
-$shortcutPath = Join-Path ([Environment]::GetFolderPath('Startup')) 'Windows Power Profiles.lnk'
+$shortcutPath = Join-Path ([Environment]::GetFolderPath('Startup')) 'Hibearnate.lnk'
 if (Test-Path $shortcutPath) {
     Remove-Item $shortcutPath
     "Removed $shortcutPath"
 }
 
 $running = @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" |
-    Where-Object { $_.CommandLine -like '*PowerProfiles.ps1*' -and $_.ProcessId -ne $PID })
+    Where-Object { $_.CommandLine -like '*Hibearnate.ps1*' -and $_.ProcessId -ne $PID })
 
 if ($running) {
     $exitEvent = $null
-    $asked = [System.Threading.EventWaitHandle]::TryOpenExisting('Local\WindowsPowerProfiles.Exit', [ref]$exitEvent)
+    $asked = [System.Threading.EventWaitHandle]::TryOpenExisting('Local\Hibearnate.Exit', [ref]$exitEvent)
     if ($asked) {
         [void]$exitEvent.Set()
         'Asked the tray app to exit (it checks every 10 seconds)...'
@@ -47,4 +48,11 @@ if ($running) {
 
 if (-not $KeepSettings) {
     & (Join-Path $PSScriptRoot 'Restore-Baseline.ps1')
+    # After a full restore the record has done its job. Remove it, so a later
+    # install records the settings as they are then, not as they were now.
+    $baselinePath = Join-Path $env:LOCALAPPDATA 'Hibearnate\baseline.json'
+    if ($LASTEXITCODE -eq 0 -and (Test-Path $baselinePath)) {
+        Remove-Item $baselinePath
+        "Removed $baselinePath"
+    }
 }

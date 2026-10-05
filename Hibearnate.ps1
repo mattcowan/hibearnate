@@ -38,7 +38,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-Add-Type -Path (Join-Path $PSScriptRoot 'PowerProfiles.cs') -ReferencedAssemblies System.Windows.Forms
+Add-Type -Path (Join-Path $PSScriptRoot 'Hibearnate.cs') -ReferencedAssemblies System.Windows.Forms
 
 # ---------------------------------------------------------------- settings
 
@@ -52,14 +52,17 @@ $Config = @{
     AutoQuietMinutes        = 10       # Auto waits this long with no busy signal before Away
     ClaudeBusyCpuMs         = 2000     # CPU per poll (10 s) that marks a session tree busy;
                                        # idle trees measured at up to about 1000
+    # Optional: a claude-status-dashboard board (github.com/mattcowan/claude-status-dashboard).
+    # Set to $null to turn the dashboard signal off; Auto then uses the process checks only.
     DashboardUrl            = 'http://127.0.0.1:4787/api/board'
     DashboardFreshHours     = 6        # ignore Working cards with no activity for longer
     HibernateIdleLidClosed  = 2        # minutes idle before hibernating with the lid closed
     HibernateIdleLidOpen    = 10       # minutes idle before hibernating with the lid open
-    BatteryFloorPercent     = 15       # Keep Working hibernates on battery below this
-    LogDir                  = Join-Path $env:LOCALAPPDATA 'WindowsPowerProfiles'
+    BatteryFloorPercent     = 15       # at or below this on battery, Keep Working ends (Away, then idle hibernate)
+    LogDir                  = Join-Path $env:LOCALAPPDATA 'Hibearnate'
 }
 $LogPath = Join-Path $Config.LogDir 'power-profiles.log'
+$BaselinePath = Join-Path $Config.LogDir 'baseline.json'
 
 $SUB_BUTTONS = [guid]'4f971e89-eebd-4455-a8de-9e59040e7347'
 $SUB_SLEEP   = [guid]'238c9fa8-0aad-41ed-83f4-97be242c8f20'
@@ -118,21 +121,80 @@ function Format-Minutes([int]$Minutes) {
     return '{0} hours' -f ($Minutes / 60)
 }
 
+# Records the settings this app changes, as they were before its first run, so
+# Restore-Baseline.ps1 can put them back on any machine. Never overwrites an
+# existing file: a later run would record the app's own Away values instead.
+# Each entry carries its own GUIDs and the plan it came from, so the restore
+# script needs neither this file's tables nor the C# helper.
+function Save-Baseline {
+    if (Test-Path $BaselinePath) {
+        # Never overwrite (the settings may already be the app's own), but say
+        # so if the record cannot be used, because nothing can rebuild it.
+        if (-not (Test-BaselineFile $BaselinePath)) {
+            Write-Log "WARNING: $BaselinePath is not a usable baseline; Restore-Baseline.ps1 will refuse it"
+            Show-Note 'The record of the original power settings is damaged. See the log.'
+        }
+        return
+    }
+    $scheme = [Hibearnate.PowerSettings]::ActiveScheme()
+    $entries = foreach ($key in $Settings.Keys) {
+        $s = $Settings[$key]
+        $v = [Hibearnate.PowerSettings]::Read($s.Sub, $s.Id)
+        [ordered]@{ Name = $key; Subgroup = "$($s.Sub)"; Setting = "$($s.Id)"; AC = $v[0]; DC = $v[1] }
+    }
+    if (-not (Test-Path $Config.LogDir)) {
+        New-Item -ItemType Directory -Path $Config.LogDir -Force | Out-Null
+    }
+    # Write a temp file, check it, then rename it into place. The rename is
+    # atomic on one volume and fails if the target exists, so the record is
+    # either complete or absent, and a second writer can never replace it.
+    $tempPath = "$BaselinePath.tmp"
+    [ordered]@{ RecordedAt = (Get-Date).ToString('s'); Scheme = "$scheme"; Settings = @($entries) } |
+        ConvertTo-Json -Depth 4 | Set-Content -Path $tempPath -Encoding UTF8
+    if (-not (Test-BaselineFile $tempPath)) {
+        Remove-Item $tempPath -ErrorAction SilentlyContinue
+        throw "the baseline written to $tempPath did not read back correctly"
+    }
+    [System.IO.File]::Move($tempPath, $BaselinePath)
+    Write-Log "Baseline recorded: $BaselinePath"
+}
+
+# True when the file parses and holds a plan GUID and, for every setting this
+# app changes, its GUIDs and numeric AC and DC values. Restore-Baseline.ps1
+# carries its own copy of this check, so it still works without this script.
+function Test-BaselineFile([string]$Path) {
+    try {
+        $b = Get-Content -Path $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $guid = [guid]::Empty
+        if (-not [guid]::TryParse([string]$b.Scheme, [ref]$guid)) { return $false }
+        $names = @($b.Settings | ForEach-Object { $_.Name })
+        foreach ($key in $Settings.Keys) { if ($names -notcontains $key) { return $false } }
+        foreach ($s in $b.Settings) {
+            if (-not [guid]::TryParse([string]$s.Subgroup, [ref]$guid)) { return $false }
+            if (-not [guid]::TryParse([string]$s.Setting, [ref]$guid)) { return $false }
+            if ($s.AC -isnot [ValueType] -or $s.DC -isnot [ValueType]) { return $false }
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 # Writes a profile, re-activates the scheme, and reads every value back.
 # Returns the names of settings that did not take, so callers can report them.
 function Set-PowerProfile([string]$Name) {
     $wanted = $Profiles[$Name]
     foreach ($key in $wanted.Keys) {
         $s = $Settings[$key]
-        [WindowsPowerProfiles.PowerSettings]::Write($s.Sub, $s.Id, [uint32]$wanted[$key][0], [uint32]$wanted[$key][1])
+        [Hibearnate.PowerSettings]::Write($s.Sub, $s.Id, [uint32]$wanted[$key][0], [uint32]$wanted[$key][1])
     }
-    [WindowsPowerProfiles.PowerSettings]::Commit()
-    [WindowsPowerProfiles.PowerSettings]::KeepSystemAwake($Name -eq 'KeepWorking')
+    [Hibearnate.PowerSettings]::Commit()
+    [Hibearnate.PowerSettings]::KeepSystemAwake($Name -eq 'KeepWorking')
 
     $failed = @()
     foreach ($key in $wanted.Keys) {
         $s = $Settings[$key]
-        $actual = [WindowsPowerProfiles.PowerSettings]::Read($s.Sub, $s.Id)
+        $actual = [Hibearnate.PowerSettings]::Read($s.Sub, $s.Id)
         if ($actual[0] -ne $wanted[$key][0] -or $actual[1] -ne $wanted[$key][1]) {
             $failed += '{0} (wanted {1}/{2}, got {3}/{4})' -f $key, $wanted[$key][0], $wanted[$key][1], $actual[0], $actual[1]
         }
@@ -141,6 +203,7 @@ function Set-PowerProfile([string]$Name) {
 }
 
 function Get-DashboardWorking {
+    if (-not $Config.DashboardUrl) { return -1 }  # signal turned off
     try {
         $board = Invoke-RestMethod -Uri $Config.DashboardUrl -TimeoutSec 2
         $fresh = (Get-Date).ToUniversalTime().AddHours(-$Config.DashboardFreshHours)
@@ -165,7 +228,7 @@ function Get-DashboardWorking {
 # constructor: createdNew only says whether the named mutex already existed,
 # so any handle left open (for example by a self-test run inside an
 # interactive shell) would make every later start think a tray was running.
-$mutex = New-Object System.Threading.Mutex($false, 'Local\WindowsPowerProfiles')
+$mutex = New-Object System.Threading.Mutex($false, 'Local\Hibearnate')
 try {
     $owned = $mutex.WaitOne(0)
 } catch [System.Threading.AbandonedMutexException] {
@@ -185,25 +248,26 @@ if (-not $owned) {
 
 if ($SelfTest) {
     try {
+        Save-Baseline  # the self-test writes settings too
         'Settings before:'
         foreach ($key in $Settings.Keys) {
-            $v = [WindowsPowerProfiles.PowerSettings]::Read($Settings[$key].Sub, $Settings[$key].Id)
+            $v = [Hibearnate.PowerSettings]::Read($Settings[$key].Sub, $Settings[$key].Id)
             '  {0,-15} AC={1,-10} DC={2}' -f $key, $v[0], $v[1]
         }
         foreach ($name in 'KeepWorking', 'Away') {
             $failed = Set-PowerProfile $name
             if ($failed) { "Profile $name FAILED: $($failed -join '; ')" } else { "Profile $name applied and verified." }
         }
-        [WindowsPowerProfiles.PowerSettings]::KeepSystemAwake($false)
+        [Hibearnate.PowerSettings]::KeepSystemAwake($false)
 
-        $activity = New-Object WindowsPowerProfiles.ClaudeActivity 'claude.exe'
+        $activity = New-Object Hibearnate.ClaudeActivity 'claude.exe'
         $null = $activity.Sample($Config.ClaudeBusyCpuMs)
         Start-Sleep -Seconds $Config.PollSeconds
         $sample = $activity.Sample($Config.ClaudeBusyCpuMs)
         'Claude sessions: {0}, busy: {1}, new processes: {2}, max CPU ms in {3}s: {4:N0}' -f $sample.Sessions, $sample.BusySessions, $sample.Spawns, $Config.PollSeconds, $sample.MaxCpuMs
         "  per session (pid:cpu+spawns): $($sample.Detail)"
         "Dashboard Working cards (fresh): $(Get-DashboardWorking)"
-        "Idle for: $(Format-Span ([WindowsPowerProfiles.UserIdle]::Get()))"
+        "Idle for: $(Format-Span ([Hibearnate.UserIdle]::Get()))"
     } finally {
         # Release and close the handle: in an interactive shell the process
         # lives on, and an open handle would outlive this run.
@@ -215,15 +279,16 @@ if ($SelfTest) {
 
 # Uninstall.ps1 sets this event to ask the tray to exit cleanly (and so put
 # the Away settings back) instead of being killed in Keep Working.
-$ExitEvent = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, 'Local\WindowsPowerProfiles.Exit')
+$ExitEvent = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, 'Local\Hibearnate.Exit')
 $ExitEvent.Reset()
 
 # ---------------------------------------------------------------- state
 
 $State = @{
     Mode            = 'Away'      # Away | KeepWorking | Auto
-    Effective       = 'Away'      # profile actually applied: Away | KeepWorking
+    Effective       = 'Away'      # profile actually applied: Away | KeepWorking | None (nothing written yet)
     KeepUntil       = $null       # [datetime] for timed Keep Working
+    KeepMinutes     = 0           # the Keep Working choice, so the menu can mark it (0 = until switched back)
     AutoAwakeSince  = $null       # start of the current Auto keep-awake stretch
     AutoLastBusy    = $null       # last poll with a busy signal
     AutoCapped      = $false      # cap reached; stays Away until signals go quiet
@@ -231,71 +296,114 @@ $State = @{
     PendingHibernate = $false
 }
 
-$Activity = New-Object WindowsPowerProfiles.ClaudeActivity 'claude.exe'
+$Activity = New-Object Hibearnate.ClaudeActivity 'claude.exe'
 $State.LastDisplayOn = $null
+$State.NoBaseline = $false   # true while the originals could not be recorded (no setting is changed)
+$State.LastPoll = $null      # time of the last wake check (poll or lid event), to spot a wake
+$State.LastResume = $null    # time of the last wake, caps the idle time
 
 # ---------------------------------------------------------------- tray icon
 
-function New-DotIcon([System.Drawing.Color]$Color, [bool]$Ring) {
+# A bear face. Green = Away, red = Keep Working, orange = Auto, so switching
+# Keep Working to Auto visibly changes the icon even while Auto keeps the
+# machine awake. The eyes show what is applied right now: closed (sleeping)
+# = the Away settings, open = staying awake. Auto also adds a white badge, so
+# the mode never depends on color alone. Drawn at 32 px; Windows scales it.
+function New-BearIcon([System.Drawing.Color]$Fur, [bool]$Awake, [bool]$Auto) {
     $bmp = New-Object System.Drawing.Bitmap 32, 32
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.SmoothingMode = 'AntiAlias'
-    $g.FillEllipse((New-Object System.Drawing.SolidBrush $Color), 2, 2, 28, 28)
-    if ($Ring) {
-        # Auto mode: a white ring inside the dot.
-        $g.DrawEllipse((New-Object System.Drawing.Pen ([System.Drawing.Color]::White), 4), 9, 9, 14, 14)
+    $dark = [System.Drawing.Color]::FromArgb(40, 30, 25)
+    # Not $fur: PowerShell names ignore case, so that is the typed $Fur parameter.
+    $furBrush = New-Object System.Drawing.SolidBrush $Fur
+    $ink = New-Object System.Drawing.SolidBrush $dark
+
+    $g.FillEllipse($furBrush, 2, 2, 11, 11)    # ears
+    $g.FillEllipse($furBrush, 19, 2, 11, 11)
+    $g.FillEllipse($furBrush, 3, 5, 26, 25)    # head
+    $g.FillEllipse((New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(245, 236, 222))), 10, 16, 12, 10)  # snout
+    $g.FillEllipse($ink, 14, 17, 4, 3)    # nose
+    if ($Awake) {
+        $g.FillEllipse($ink, 9, 11, 4, 4)
+        $g.FillEllipse($ink, 19, 11, 4, 4)
+    } else {
+        # Sleeping eyes: the lower half of an ellipse, like a closed lid.
+        $pen = New-Object System.Drawing.Pen $dark, 2
+        $g.DrawArc($pen, 8, 9, 6, 5, 0, 180)
+        $g.DrawArc($pen, 18, 9, 6, 5, 0, 180)
+    }
+    if ($Auto) {
+        $g.FillEllipse([System.Drawing.Brushes]::White, 21, 21, 10, 10)
+        $g.DrawEllipse((New-Object System.Drawing.Pen $dark, 1.5), 21, 21, 10, 10)
     }
     $g.Dispose()
     [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
 }
 
 $Icons = @{
-    Away            = New-DotIcon ([System.Drawing.Color]::SeaGreen) $false
-    KeepWorking     = New-DotIcon ([System.Drawing.Color]::OrangeRed) $false
-    AutoAway        = New-DotIcon ([System.Drawing.Color]::SeaGreen) $true
-    AutoKeepWorking = New-DotIcon ([System.Drawing.Color]::OrangeRed) $true
+    Away            = New-BearIcon ([System.Drawing.Color]::SeaGreen) $false $false
+    KeepWorking     = New-BearIcon ([System.Drawing.Color]::OrangeRed) $true $false
+    AutoAway        = New-BearIcon ([System.Drawing.Color]::Orange) $false $true
+    AutoKeepWorking = New-BearIcon ([System.Drawing.Color]::Orange) $true $true
 }
 
 $Tray = New-Object System.Windows.Forms.NotifyIcon
 $Tray.Icon = $Icons.Away
-$Tray.Text = 'Power: Away'
+$Tray.Text = 'Hibearnate: Away'
 $Tray.Visible = $true
 
 function Update-Tray {
     $text = switch ($State.Mode) {
-        'Away' { 'Power: Away (lid hibernates)' }
+        'Away' { 'Hibearnate: Away (lid hibernates)' }
         'KeepWorking' {
             if ($State.KeepUntil) {
-                'Power: Keep Working, {0} left' -f (Format-Span ($State.KeepUntil - (Get-Date)))
+                'Hibearnate: Keep Working, {0} left' -f (Format-Span ($State.KeepUntil - (Get-Date)))
             } else {
-                'Power: Keep Working until switched back'
+                'Hibearnate: Keep Working until switched back'
             }
         }
         'Auto' {
-            if ($State.Effective -eq 'KeepWorking') { "Power: Auto, awake ($($State.AutoReason))" }
-            elseif ($State.AutoCapped) { 'Power: Auto, Away (time cap reached)' }
-            elseif ($null -ne (Get-LowBattery)) { 'Power: Auto, Away (battery low)' }
-            else { 'Power: Auto, Away (Claude idle)' }
+            if ($State.Effective -eq 'KeepWorking') { "Hibearnate: Auto, awake ($($State.AutoReason))" }
+            elseif ($State.AutoCapped) { 'Hibearnate: Auto, Away (time cap reached)' }
+            elseif ($null -ne (Get-LowBattery)) { 'Hibearnate: Auto, Away (battery low)' }
+            else { 'Hibearnate: Auto, Away (Claude idle)' }
         }
     }
+    if ($State.NoBaseline) { $text = 'Hibearnate: originals not recorded, no changes made' }
     # NotifyIcon throws on tooltip text longer than 63 characters.
     if ($text.Length -gt 63) { $text = $text.Substring(0, 63) }
     $Tray.Text = $text
-    $iconKey = if ($State.Mode -eq 'Auto') { 'Auto' + $State.Effective } else { $State.Effective }
+    # Effective is 'None' until a profile is applied; show the Away bear then.
+    $shown = if ($State.Effective -eq 'KeepWorking') { 'KeepWorking' } else { 'Away' }
+    $iconKey = if ($State.Mode -eq 'Auto') { 'Auto' + $shown } else { $shown }
     $Tray.Icon = $Icons[$iconKey]
 
     $MenuAway.Checked = $State.Mode -eq 'Away'
     $MenuKeep.Checked = $State.Mode -eq 'KeepWorking'
+    # Show the chosen duration: a check on its submenu item, and the time left
+    # on the parent item, so the open menu answers "which one did I pick?".
+    foreach ($item in $MenuKeep.DropDownItems) {
+        $item.Checked = $State.Mode -eq 'KeepWorking' -and [int]$item.Tag -eq $State.KeepMinutes
+    }
+    $MenuKeep.Text = if ($State.Mode -ne 'KeepWorking') { 'Keep Working' }
+        elseif ($State.KeepUntil) { 'Keep Working ({0} left)' -f (Format-Span ($State.KeepUntil - (Get-Date))) }
+        else { 'Keep Working (until switched back)' }
     $MenuAuto.Checked = $State.Mode -eq 'Auto'
 }
 
 function Show-Note([string]$Text) {
-    $Tray.ShowBalloonTip(5000, 'Power profile', $Text, [System.Windows.Forms.ToolTipIcon]::Info)
+    $Tray.ShowBalloonTip(5000, 'Hibearnate', $Text, [System.Windows.Forms.ToolTipIcon]::Info)
 }
 
 # ---------------------------------------------------------------- mode changes
 
 function Set-Effective([string]$Name, [string]$Why) {
+    # Fail closed: without a record of the original settings, change nothing,
+    # so the originals cannot be lost. Invoke-Poll retries the record.
+    if ($State.NoBaseline) {
+        Write-Log "Skipped $Name ($Why): the original settings are not recorded yet"
+        return
+    }
     if ($State.Effective -eq $Name -and $Why -ne 'launch') { return }
     $failed = Set-PowerProfile $Name
     $State.Effective = $Name
@@ -316,6 +424,7 @@ function Enter-Away([string]$Why) {
 function Enter-KeepWorking([int]$Minutes) {
     $State.Mode = 'KeepWorking'
     $State.KeepUntil = if ($Minutes -gt 0) { (Get-Date).AddMinutes($Minutes) } else { $null }
+    $State.KeepMinutes = $Minutes
     $State.PendingHibernate = $false
     Set-Effective 'KeepWorking' "manual, $(Format-Minutes $Minutes)"
     Update-Tray
@@ -360,21 +469,37 @@ function Invoke-Hibernate([string]$Why) {
     Update-Tray
     Write-Log "Hibernating: $Why"
     try {
-        [WindowsPowerProfiles.PowerSettings]::Hibernate()
+        [Hibearnate.PowerSettings]::Hibernate()
     } catch {
         Write-Log "ERROR: hibernate failed: $_"
         Show-Note 'Hibernate failed. See the log.'
     }
 }
 
+# Time since the last keyboard or mouse input, but never more than the time
+# since the last wake. GetLastInputInfo keeps counting through a hibernate or
+# standby, so right after a wake it reports the whole time the machine was off
+# (seen: "idle 4h 25m" one second after the lid opened), and the lid state can
+# still say "closed" until Windows sends the lid-open notice.
+function Get-EffectiveIdle {
+    $idle = [Hibearnate.UserIdle]::Get()
+    if ($State.LastResume) {
+        $sinceWake = (Get-Date) - $State.LastResume
+        if ($sinceWake -lt $idle) { return $sinceWake }
+    }
+    return $idle
+}
+
 function Test-PendingHibernate {
     if (-not $State.PendingHibernate -or $State.Effective -ne 'Away') { return }
-    $idle = [WindowsPowerProfiles.UserIdle]::Get()
+    $idle = Get-EffectiveIdle
     $lidClosed = $Window.LidOpen -eq $false
     if ($idle.TotalSeconds -lt 60) {
-        # Someone is at the keyboard (for example docked with the lid shut).
+        # Someone is at the keyboard (for example docked with the lid shut), or
+        # the machine just woke. After a wake with nobody there, the Away
+        # timers still put it into standby and then hibernate.
         $State.PendingHibernate = $false
-        Write-Log 'Pending hibernate canceled: user active'
+        Write-Log 'Pending hibernate canceled: user active or just woke'
     } elseif ($lidClosed -and $idle.TotalMinutes -ge $Config.HibernateIdleLidClosed) {
         Invoke-Hibernate "work ended, lid closed, idle $(Format-Span $idle)"
     } elseif ($idle.TotalMinutes -ge $Config.HibernateIdleLidOpen) {
@@ -454,10 +579,39 @@ function Test-Battery {
     Complete-Work "Battery at $percent%"
 }
 
+# The poll timer does not run while the machine hibernates or sits in standby
+# (Windows pauses desktop apps there), so a long gap since the last check means
+# the machine just woke. Called before anything decides on idle time: by every
+# poll, and by the lid handler, whose lid-closed notice can arrive before the
+# first poll after a wake.
+#
+# The 3-poll threshold is a heuristic. A UI-thread stall longer than that also
+# counts as a wake. That fails safe: the only effect is that one pending
+# hibernate is canceled and the Away timers apply instead.
+function Update-WakeState {
+    $now = Get-Date
+    if ($State.LastPoll -and ($now - $State.LastPoll).TotalSeconds -gt 3 * $Config.PollSeconds) {
+        $State.LastResume = $now
+        Write-Log "Woke after $(Format-Span ($now - $State.LastPoll)) without a check"
+    }
+    $State.LastPoll = $now
+}
+
 function Invoke-Poll {
     if ($ExitEvent.WaitOne(0)) {
         Stop-App 'exit requested by Uninstall.ps1'
         return
+    }
+    Update-WakeState
+    if ($State.NoBaseline) {
+        try {
+            Save-Baseline
+            $State.NoBaseline = $false
+            Write-Log 'Original settings recorded on retry'
+            Set-Effective $(if ($State.Mode -eq 'KeepWorking') { 'KeepWorking' } else { 'Away' }) 'original settings recorded'
+        } catch {
+            # Logged once at launch; stay quiet until it works.
+        }
     }
     if ($State.Mode -eq 'KeepWorking' -and $State.KeepUntil -and (Get-Date) -ge $State.KeepUntil) {
         Enter-Away 'timer ended'
@@ -554,6 +708,7 @@ $MenuExit.add_Click({ Stop-App 'menu' })
     $MenuExit
 ))
 $Tray.ContextMenuStrip = $Menu
+$Menu.add_Opening({ try { Update-Tray } catch { Write-Log "ERROR: $_" } })  # fresh "time left" when the menu opens
 
 # Left click opens the same menu as right click. NotifyIcon only exposes this
 # through a private method.
@@ -565,8 +720,8 @@ $Tray.add_MouseClick({
 
 # ---------------------------------------------------------------- hotkey, lid, display
 
-$Window = New-Object WindowsPowerProfiles.MessageWindow
-$mods = [WindowsPowerProfiles.MessageWindow]::MOD_CONTROL -bor [WindowsPowerProfiles.MessageWindow]::MOD_ALT -bor [WindowsPowerProfiles.MessageWindow]::MOD_SHIFT
+$Window = New-Object Hibearnate.MessageWindow
+$mods = [Hibearnate.MessageWindow]::MOD_CONTROL -bor [Hibearnate.MessageWindow]::MOD_ALT -bor [Hibearnate.MessageWindow]::MOD_SHIFT
 if (-not $Window.RegisterHotkey($mods, [System.Windows.Forms.Keys]::E)) {
     Write-Log 'WARNING: Ctrl+Alt+Shift+E is taken by another app; the hotkey is off. Use the tray menu.'
     $MenuExplorer.ShortcutKeyDisplayString = '(hotkey unavailable)'
@@ -575,6 +730,7 @@ $Window.add_HotkeyPressed({ try { Restart-Explorer } catch { Write-Log "ERROR: $
 $Window.add_LidChanged({
     try {
         Write-Log $(if ($Window.LidOpen) { 'Lid opened' } else { 'Lid closed' })
+        Update-WakeState
         if ($Window.LidOpen) { $State.PendingHibernate = $false } else { Test-PendingHibernate }
     } catch { Write-Log "ERROR: $_" }
 })
@@ -588,7 +744,8 @@ $Window.add_SessionEnding({
     # lid ignored until the next login starts the app. Write the profile
     # directly: Windows gives this handler little time.
     try {
-        if ($State.Effective -ne 'Away') {
+        # Only undo what the app applied; 'None' means nothing was written.
+        if ($State.Effective -eq 'KeepWorking') {
             $failed = Set-PowerProfile 'Away'
             $State.Effective = 'Away'
             if ($failed) { Write-Log "WARNING: session ending, Away applied with errors: $($failed -join '; ')" }
@@ -606,6 +763,17 @@ $Timer.add_Tick({ try { Invoke-Poll } catch { Write-Log "ERROR in poll: $_" } })
 
 $null = $Activity.Sample($Config.ClaudeBusyCpuMs)  # baseline for the first Auto poll
 Write-Log "Started (pid $PID)"
+try {
+    Save-Baseline
+} catch {
+    # Fail closed: change no setting until the originals are on record, or a
+    # later start would record the app's own values as the originals.
+    # Invoke-Poll retries. The tray, menu and hotkey keep working.
+    $State.NoBaseline = $true
+    $State.Effective = 'None'
+    Write-Log "WARNING: could not record the original settings, so no setting was changed: $_"
+    Show-Note 'Could not record the original power settings, so Hibearnate changed nothing. It will retry. See the log.'
+}
 Set-Effective 'Away' 'launch'
 Update-Tray
 $Timer.Start()
@@ -613,14 +781,14 @@ $Timer.Start()
 try {
     [System.Windows.Forms.Application]::Run()
 } finally {
-    if ($State.Effective -ne 'Away') {
+    if ($State.Effective -eq 'KeepWorking') {
         try {
             $failed = Set-PowerProfile 'Away'
             if ($failed) { Write-Log "WARNING: unexpected exit, Away applied with errors: $($failed -join '; ')" }
             else { Write-Log 'Away applied on unexpected exit' }
         } catch { Write-Log "ERROR: $_" }
     }
-    [WindowsPowerProfiles.PowerSettings]::KeepSystemAwake($false)
+    [Hibearnate.PowerSettings]::KeepSystemAwake($false)
     $Tray.Visible = $false
     $Tray.Dispose()
     $mutex.ReleaseMutex()

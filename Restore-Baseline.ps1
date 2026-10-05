@@ -1,39 +1,77 @@
 <#
 .SYNOPSIS
-    Puts the four power settings this tool changes back to the values recorded
-    on this machine on 2026-10-01, before the tool was installed.
+    Puts the power settings that Hibearnate changes back to the values they had
+    before its first run on this machine.
 
 .DESCRIPTION
-    Uses powercfg directly, so it works even if PowerProfiles.ps1 or its C#
+    Hibearnate.ps1 records those values to %LOCALAPPDATA%\Hibearnate\baseline.json
+    the first time it starts, before it changes anything, and never overwrites
+    that file. This script writes them back into the power plan they came from.
+
+    Uses powercfg directly, so it works even if Hibearnate.ps1 or its C#
     helper is broken. Does not need admin rights.
 
-    The values are this machine's, typed in from `powercfg /qh` output. They
-    are not right for a different machine. The DC "Hibernate after" value of
-    2147483647 is what this machine had; it means "never" in practice.
-
+    If no baseline file exists, it changes nothing and exits with code 1.
     Exits with code 1 and names each failed setting if powercfg reports an error.
-#>
 
-$baseline = @(
-    # Subgroup, setting, AC, DC, label
-    @('4f971e89-eebd-4455-a8de-9e59040e7347', '5ca83367-6e45-459f-a27b-476b1d01c936', 2, 2, 'Lid close action: Hibernate')
-    @('238c9fa8-0aad-41ed-83f4-97be242c8f20', '29f6c1db-86da-48c5-9fdb-f2b67b1f44da', 3600, 300, 'Sleep after: 60 min AC, 5 min DC')
-    @('238c9fa8-0aad-41ed-83f4-97be242c8f20', '9d7815a6-7ee4-497e-8888-515a05f02364', 0, 2147483647, 'Hibernate after: never')
-    @('fea3413e-7e05-4911-9a71-700331f1c294', 'f15576e8-98b7-4186-b944-eafa664402d9', 1, 2, 'Network in standby: on AC, managed DC')
-)
+.PARAMETER Path
+    The baseline file to restore. Defaults to the one Hibearnate.ps1 records.
+#>
+param([string]$Path = (Join-Path $env:LOCALAPPDATA 'Hibearnate\baseline.json'))
+
+if (-not (Test-Path $Path)) {
+    Write-Warning "No baseline at $Path, so nothing was changed. Hibearnate records it on its first start."
+    exit 1
+}
+
+# Refuse a damaged record before touching anything. Without this, a file that
+# does not parse gave an empty list, "Done" and exit 0, and Uninstall.ps1 then
+# deleted the record. Same check as Test-BaselineFile in Hibearnate.ps1, kept
+# separate so this script works when that one is broken.
+$problem = $null
+try {
+    $baseline = Get-Content -Path $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $guid = [guid]::Empty
+    if (-not [guid]::TryParse([string]$baseline.Scheme, [ref]$guid)) { $problem = 'no valid power plan GUID' }
+    else {
+        # The four settings Hibearnate changes (the $Settings keys in Hibearnate.ps1).
+        $names = @($baseline.Settings | ForEach-Object { $_.Name })
+        $missing = @('LidAction', 'SleepAfter', 'HibernateAfter', 'StandbyNetwork') | Where-Object { $names -notcontains $_ }
+        if ($missing) { $problem = 'missing setting(s): ' + ($missing -join ', ') }
+    }
+    if (-not $problem) {
+        foreach ($s in $baseline.Settings) {
+            if (-not [guid]::TryParse([string]$s.Subgroup, [ref]$guid) -or -not [guid]::TryParse([string]$s.Setting, [ref]$guid) -or
+                $s.AC -isnot [ValueType] -or $s.DC -isnot [ValueType]) {
+                $problem = "setting '$($s.Name)' is incomplete"
+                break
+            }
+        }
+    }
+} catch {
+    $problem = "it does not parse: $($_.Exception.Message)"
+}
+if ($problem) {
+    Write-Warning "The baseline at $Path is damaged ($problem), so nothing was changed."
+    exit 1
+}
+
+"Restoring the settings recorded on $($baseline.RecordedAt) for power plan $($baseline.Scheme)."
 
 $failed = @()
-foreach ($b in $baseline) {
-    powercfg /setacvalueindex SCHEME_CURRENT $b[0] $b[1] $b[2]
+foreach ($s in $baseline.Settings) {
+    powercfg /setacvalueindex $baseline.Scheme $s.Subgroup $s.Setting $s.AC
     $acCode = $LASTEXITCODE
-    powercfg /setdcvalueindex SCHEME_CURRENT $b[0] $b[1] $b[3]
+    powercfg /setdcvalueindex $baseline.Scheme $s.Subgroup $s.Setting $s.DC
     $dcCode = $LASTEXITCODE
     if ($acCode -ne 0 -or $dcCode -ne 0) {
-        $failed += "$($b[4]) (powercfg exit codes AC=$acCode DC=$dcCode)"
+        $failed += "$($s.Name) (powercfg exit codes AC=$acCode DC=$dcCode)"
     } else {
-        "Restored $($b[4])"
+        "Restored $($s.Name): AC=$($s.AC) DC=$($s.DC)"
     }
 }
+# Re-activate the current plan so Windows applies the values. If the recorded
+# plan is not the active one, its values are stored and apply when it is selected.
 powercfg /setactive SCHEME_CURRENT
 if ($LASTEXITCODE -ne 0) { $failed += "Re-activate the scheme (powercfg exit code $LASTEXITCODE)" }
 
@@ -42,3 +80,5 @@ if ($failed) {
     exit 1
 }
 'Done. Check with: powercfg /qh SCHEME_CURRENT'
+# Explicit, because Uninstall.ps1 deletes the record only on exit code 0.
+exit 0
