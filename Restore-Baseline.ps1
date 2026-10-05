@@ -24,7 +24,33 @@ if (-not (Test-Path $Path)) {
     exit 1
 }
 
-$baseline = Get-Content -Path $Path -Raw | ConvertFrom-Json
+# Refuse a damaged record before touching anything. Without this, a file that
+# does not parse gave an empty list, "Done" and exit 0, and Uninstall.ps1 then
+# deleted the record. Same check as Test-BaselineFile in Hibearnate.ps1, kept
+# separate so this script works when that one is broken.
+$problem = $null
+try {
+    $baseline = Get-Content -Path $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $guid = [guid]::Empty
+    if (-not [guid]::TryParse([string]$baseline.Scheme, [ref]$guid)) { $problem = 'no valid power plan GUID' }
+    elseif (@($baseline.Settings).Count -eq 0) { $problem = 'no settings' }
+    else {
+        foreach ($s in $baseline.Settings) {
+            if (-not [guid]::TryParse([string]$s.Subgroup, [ref]$guid) -or -not [guid]::TryParse([string]$s.Setting, [ref]$guid) -or
+                $s.AC -isnot [ValueType] -or $s.DC -isnot [ValueType]) {
+                $problem = "setting '$($s.Name)' is incomplete"
+                break
+            }
+        }
+    }
+} catch {
+    $problem = "it does not parse: $($_.Exception.Message)"
+}
+if ($problem) {
+    Write-Warning "The baseline at $Path is damaged ($problem), so nothing was changed."
+    exit 1
+}
+
 "Restoring the settings recorded on $($baseline.RecordedAt) for power plan $($baseline.Scheme)."
 
 $failed = @()

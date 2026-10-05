@@ -138,7 +138,7 @@ This removes the Startup shortcut and asks the app to stop. The app puts the Awa
 
 To put back only the settings, run `.\Restore-Baseline.ps1`. This script uses `powercfg` directly, so it works if the app does not. If `powercfg` fails, the script names each setting that it did not restore.
 
-The app records the original values to `%LOCALAPPDATA%\Hibearnateaseline.json` the first time it starts, before it changes a setting. The app never overwrites this file. If the file does not exist, `Restore-Baseline.ps1` changes nothing and shows a warning.
+The app records the original values to `%LOCALAPPDATA%\Hibearnateaseline.json` the first time it starts, before it changes a setting. The app writes the file completely or not at all, and it never overwrites the file. If the file does not exist or is damaged, `Restore-Baseline.ps1` changes nothing and shows a warning. If the app finds a damaged file when it starts, it shows a notification. If the app cannot write the file, it changes no setting and shows a notification. It tries again every 10 seconds, and it applies Away when the file is written.
 
 ## Files
 

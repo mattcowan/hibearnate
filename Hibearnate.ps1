@@ -129,7 +129,15 @@ function Format-Minutes([int]$Minutes) {
 # Each entry carries its own GUIDs and the plan it came from, so the restore
 # script needs neither this file's tables nor the C# helper.
 function Save-Baseline {
-    if (Test-Path $BaselinePath) { return }
+    if (Test-Path $BaselinePath) {
+        # Never overwrite (the settings may already be the app's own), but say
+        # so if the record cannot be used, because nothing can rebuild it.
+        if (-not (Test-BaselineFile $BaselinePath)) {
+            Write-Log "WARNING: $BaselinePath is not a usable baseline; Restore-Baseline.ps1 will refuse it"
+            Show-Note 'The record of the original power settings is damaged. See the log.'
+        }
+        return
+    }
     $scheme = [Hibearnate.PowerSettings]::ActiveScheme()
     $entries = foreach ($key in $Settings.Keys) {
         $s = $Settings[$key]
@@ -139,9 +147,39 @@ function Save-Baseline {
     if (-not (Test-Path $Config.LogDir)) {
         New-Item -ItemType Directory -Path $Config.LogDir -Force | Out-Null
     }
+    # Write a temp file, check it, then rename it into place. The rename is
+    # atomic on one volume and fails if the target exists, so the record is
+    # either complete or absent, and a second writer can never replace it.
+    $tempPath = "$BaselinePath.tmp"
     [ordered]@{ RecordedAt = (Get-Date).ToString('s'); Scheme = "$scheme"; Settings = @($entries) } |
-        ConvertTo-Json -Depth 4 | Set-Content -Path $BaselinePath -Encoding UTF8
+        ConvertTo-Json -Depth 4 | Set-Content -Path $tempPath -Encoding UTF8
+    if (-not (Test-BaselineFile $tempPath)) {
+        Remove-Item $tempPath -ErrorAction SilentlyContinue
+        throw "the baseline written to $tempPath did not read back correctly"
+    }
+    [System.IO.File]::Move($tempPath, $BaselinePath)
     Write-Log "Baseline recorded: $BaselinePath"
+}
+
+# True when the file parses and holds a plan GUID and, for every setting this
+# app changes, its GUIDs and numeric AC and DC values. Restore-Baseline.ps1
+# carries its own copy of this check, so it still works without this script.
+function Test-BaselineFile([string]$Path) {
+    try {
+        $b = Get-Content -Path $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $guid = [guid]::Empty
+        if (-not [guid]::TryParse([string]$b.Scheme, [ref]$guid)) { return $false }
+        $names = @($b.Settings | ForEach-Object { $_.Name })
+        foreach ($key in $Settings.Keys) { if ($names -notcontains $key) { return $false } }
+        foreach ($s in $b.Settings) {
+            if (-not [guid]::TryParse([string]$s.Subgroup, [ref]$guid)) { return $false }
+            if (-not [guid]::TryParse([string]$s.Setting, [ref]$guid)) { return $false }
+            if ($s.AC -isnot [ValueType] -or $s.DC -isnot [ValueType]) { return $false }
+        }
+        return $true
+    } catch {
+        return $false
+    }
 }
 
 function Set-PowerProfile([string]$Name) {
@@ -248,7 +286,7 @@ $ExitEvent.Reset()
 
 $State = @{
     Mode            = 'Away'      # Away | KeepWorking | Auto
-    Effective       = 'Away'      # profile actually applied: Away | KeepWorking
+    Effective       = 'Away'      # profile actually applied: Away | KeepWorking | None (nothing written yet)
     KeepUntil       = $null       # [datetime] for timed Keep Working
     KeepMinutes     = 0           # the Keep Working choice, so the menu can mark it (0 = until switched back)
     AutoAwakeSince  = $null       # start of the current Auto keep-awake stretch
@@ -260,6 +298,7 @@ $State = @{
 
 $Activity = New-Object Hibearnate.ClaudeActivity 'claude.exe'
 $State.LastDisplayOn = $null
+$State.NoBaseline = $false   # true while the originals could not be recorded (no setting is changed)
 $State.LastPoll = $null      # time of the last poll, to spot a wake
 $State.LastResume = $null    # time of the last wake, caps the idle time
 
@@ -330,10 +369,13 @@ function Update-Tray {
             else { 'Hibearnate: Auto, Away (Claude idle)' }
         }
     }
+    if ($State.NoBaseline) { $text = 'Hibearnate: originals not recorded, no changes made' }
     # NotifyIcon throws on tooltip text longer than 63 characters.
     if ($text.Length -gt 63) { $text = $text.Substring(0, 63) }
     $Tray.Text = $text
-    $iconKey = if ($State.Mode -eq 'Auto') { 'Auto' + $State.Effective } else { $State.Effective }
+    # Effective is 'None' until a profile is applied; show the Away bear then.
+    $shown = if ($State.Effective -eq 'KeepWorking') { 'KeepWorking' } else { 'Away' }
+    $iconKey = if ($State.Mode -eq 'Auto') { 'Auto' + $shown } else { $shown }
     $Tray.Icon = $Icons[$iconKey]
 
     $MenuAway.Checked = $State.Mode -eq 'Away'
@@ -356,6 +398,12 @@ function Show-Note([string]$Text) {
 # ---------------------------------------------------------------- mode changes
 
 function Set-Effective([string]$Name, [string]$Why) {
+    # Fail closed: without a record of the original settings, change nothing,
+    # so the originals cannot be lost. Invoke-Poll retries the record.
+    if ($State.NoBaseline) {
+        Write-Log "Skipped $Name ($Why): the original settings are not recorded yet"
+        return
+    }
     if ($State.Effective -eq $Name -and $Why -ne 'launch') { return }
     $failed = Set-PowerProfile $Name
     $State.Effective = $Name
@@ -546,6 +594,16 @@ function Invoke-Poll {
         Write-Log "Woke after $(Format-Span ($now - $State.LastPoll)) without a poll"
     }
     $State.LastPoll = $now
+    if ($State.NoBaseline) {
+        try {
+            Save-Baseline
+            $State.NoBaseline = $false
+            Write-Log 'Original settings recorded on retry'
+            Set-Effective $(if ($State.Mode -eq 'KeepWorking') { 'KeepWorking' } else { 'Away' }) 'original settings recorded'
+        } catch {
+            # Logged once at launch; stay quiet until it works.
+        }
+    }
     if ($State.Mode -eq 'KeepWorking' -and $State.KeepUntil -and (Get-Date) -ge $State.KeepUntil) {
         Enter-Away 'timer ended'
         Complete-Work 'Keep Working time ended'
@@ -676,7 +734,8 @@ $Window.add_SessionEnding({
     # lid ignored until the next login starts the app. Write the profile
     # directly: Windows gives this handler little time.
     try {
-        if ($State.Effective -ne 'Away') {
+        # Only undo what the app applied; 'None' means nothing was written.
+        if ($State.Effective -eq 'KeepWorking') {
             $failed = Set-PowerProfile 'Away'
             $State.Effective = 'Away'
             if ($failed) { Write-Log "WARNING: session ending, Away applied with errors: $($failed -join '; ')" }
@@ -697,9 +756,13 @@ Write-Log "Started (pid $PID)"
 try {
     Save-Baseline
 } catch {
-    # Keep going: Away is the safe state. Only Uninstall loses the originals.
-    Write-Log "WARNING: could not record the baseline: $_"
-    Show-Note 'Could not record the original power settings. See the log.'
+    # Fail closed: change no setting until the originals are on record, or a
+    # later start would record the app's own values as the originals.
+    # Invoke-Poll retries. The tray, menu and hotkey keep working.
+    $State.NoBaseline = $true
+    $State.Effective = 'None'
+    Write-Log "WARNING: could not record the original settings, so no setting was changed: $_"
+    Show-Note 'Could not record the original power settings, so Hibearnate changed nothing. It will retry. See the log.'
 }
 Set-Effective 'Away' 'launch'
 Update-Tray
@@ -708,7 +771,7 @@ $Timer.Start()
 try {
     [System.Windows.Forms.Application]::Run()
 } finally {
-    if ($State.Effective -ne 'Away') {
+    if ($State.Effective -eq 'KeepWorking') {
         try {
             $failed = Set-PowerProfile 'Away'
             if ($failed) { Write-Log "WARNING: unexpected exit, Away applied with errors: $($failed -join '; ')" }
