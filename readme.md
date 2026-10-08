@@ -127,7 +127,7 @@ The list is in `%LOCALAPPDATA%\Hibearnate\restart-commands.json`:
 | --- | --- | --- |
 | `Name` | Yes | The text in the menu. |
 | `Stop` | Yes | The process names to stop, as Task Manager shows them on the Details tab. The `.exe` is optional. The app stops every process with each name. Wildcards are not permitted. |
-| `Start` | No | The program to start after the stop. Write each `\` as `\\`. You can use variables such as `%LOCALAPPDATA%`. Without `Start`, the command only stops the processes. |
+| `Start` | No | The program to start after the stop. Use a full path to a program file, or a program name that Windows finds, such as `notepad.exe`. Write each `\` as `\\`. You can use variables such as `%LOCALAPPDATA%`. Without `Start`, the command only stops the processes. |
 | `Arguments` | No | The arguments for the program. |
 | `WaitSeconds` | No | The time to wait between the stop and the start, from 0 to 30 seconds. The default is 2. Some apps need this time to release their devices. |
 | `Hotkey` | No | A global hotkey, for example `Ctrl+Alt+Shift+L`. Use one key and one or more of `Ctrl`, `Alt`, `Shift`, and `Win`. |
@@ -142,7 +142,7 @@ Task Manager shows other names on the Processes tab. For LG HUB, "LGHUB Agent" i
 
 Each restart writes a line to the log and shows a notification. If a process does not stop, or the program does not start, the notification tells you to look in the log. The tray menu and the other hotkeys work during a restart. The app does one restart at a time. If you exit Hibearnate during a restart, the app does not start the program.
 
-If `Start` is a full path and the program is not there, the app stops nothing and shows a notification. This prevents a stop that the app cannot undo.
+If the app cannot find the program in `Start`, the app stops nothing and shows a notification. This prevents a stop that the app cannot undo. The app cannot find the program in these cases: a full path with no file, a variable that is not set, or a relative path such as `.\app.exe`.
 
 Some limits:
 
@@ -157,7 +157,7 @@ If the file has an error, the app shows a notification and writes the error to t
 - If a command has no `Name`, no `Stop` names, a wildcard or a path in `Stop`, or a console host in `Stop`, the command is not in the menu. The other commands stay.
 - If a `Hotkey` is not correct, the command stays in the menu without a hotkey.
 - If a `WaitSeconds` is not correct, the app uses 2.
-- If `Start` is a full path that does not exist, the command stays in the menu, and the log tells you.
+- If the app cannot find the program in `Start`, the command stays in the menu. Only the log tells you, because you can install the program later.
 
 ## How it works
 

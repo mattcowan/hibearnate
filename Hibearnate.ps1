@@ -251,25 +251,35 @@ function ConvertTo-Hotkey([string]$Text) {
     return @{ Modifiers = [uint32]$mods; Key = $key; Text = $label -join '+' }
 }
 
-# True when a restart command's Start is a full path that does not exist, or
-# is not a valid path at all (a pasted command line still in quotes makes
-# IsPathRooted throw). A bare name such as notepad.exe is never "missing":
-# Start-Process finds it through PATH.
+# True when a restart command's Start cannot be a program that Start-Process
+# runs: a full path with no file there (a folder only opens File Explorer), a
+# variable that ExpandEnvironmentVariables left as text because it is not
+# set, a relative path with a folder part (it would depend on this app's
+# working directory), or text that is not a valid path at all (a pasted
+# command line in quotes makes IsPathRooted throw). A bare name such as
+# notepad.exe, and a URI such as ms-settings:display, are never "missing":
+# Windows finds those itself, and PATH or App Paths cannot be checked here.
 function Test-StartMissing([string]$Start) {
     if (-not $Start) { return $false }
+    if ($Start -match '^[a-z][a-z0-9+.-]+:') { return $false }  # a URI scheme; "C:" has one letter
+    if ($Start -match '%[^%\\/]+%') { return $true }
     try {
-        return [System.IO.Path]::IsPathRooted($Start) -and -not (Test-Path -LiteralPath $Start)
+        if ([System.IO.Path]::IsPathRooted($Start)) {
+            return -not (Test-Path -LiteralPath $Start -PathType Leaf)
+        }
+        return $Start -match '[\\/]'
     } catch {
         return $true
     }
 }
 
-# Reads restart-commands.json. Returns @{ Commands; Problems }. A missing file
-# is not a problem: it only means no commands yet. An entry with a problem is
-# left out (a bad hotkey only drops the hotkey, a bad WaitSeconds becomes 2),
-# and the others still load. An "Examples" list is ignored.
+# Reads restart-commands.json. Returns @{ Commands; Problems; Warnings }. A
+# missing file is not a problem: it only means no commands yet. An entry with
+# a problem is left out (a bad hotkey only drops the hotkey, a bad WaitSeconds
+# becomes 2), and the others still load. Warnings are for log only (a Start
+# program that is not installed yet). An "Examples" list is ignored.
 function Read-RestartCommands {
-    $result = @{ Commands = @(); Problems = @() }
+    $result = @{ Commands = @(); Problems = @(); Warnings = @() }
     if (-not (Test-Path -LiteralPath $CommandsPath)) { return $result }
     try {
         # -Encoding UTF8 reads the file with or without a BOM; Notepad saves without one.
@@ -322,9 +332,10 @@ function Read-RestartCommands {
             if (-not $hotkey) { $result.Problems += "'$name' has a Hotkey that is not valid: $($entry.Hotkey)" }
         }
         $start = [Environment]::ExpandEnvironmentVariables("$($entry.Start)".Trim())
-        # Kept in the menu: the program may be installed later. The restart
-        # itself refuses to stop anything while Start is missing.
-        if (Test-StartMissing $start) { $result.Problems += "'$name' has a Start that does not exist: $start" }
+        # Kept in the menu and logged only, with no notification: the program
+        # may be installed later, and a note on every edit of the file until
+        # then would be noise. The restart itself stops nothing meanwhile.
+        if (Test-StartMissing $start) { $result.Warnings += "'$name' has a Start that is not a program file: $start" }
         $result.Commands += [pscustomobject]@{
             Name        = $name
             Stop        = $stop
@@ -411,6 +422,7 @@ if ($SelfTest) {
                 $(if ($c.Hotkey) { $c.Hotkey.Text } else { '(none)' })
         }
         foreach ($p in $restart.Problems) { "  PROBLEM: $p" }
+        foreach ($w in $restart.Warnings) { "  WARNING: $w" }
     } finally {
         # Release and close the handle: in an interactive shell the process
         # lives on, and an open handle would outlive this run.
@@ -874,8 +886,8 @@ function Invoke-RestartCommand($Command) {
     # Stop nothing when the program cannot start: a stop followed by a failed
     # start leaves the app down.
     if (Test-StartMissing $Command.Start) {
-        Write-Log "Restart $($Command.Name): not run, because Start does not exist: $($Command.Start)"
-        Show-Note "$($Command.Name) was not restarted, because its Start program does not exist. See the log."
+        Write-Log "Restart $($Command.Name): not run, because Start is not a program file: $($Command.Start)"
+        Show-Note "$($Command.Name) was not restarted, because its Start program was not found. See the log."
         return
     }
     $Restart.Run = @{
@@ -1058,6 +1070,7 @@ function Sync-RestartCommands {
 
     if ($null -ne $stamp) { Write-Log "Restart commands: $(@($read.Commands).Count) loaded from $CommandsPath" }
     foreach ($p in $problems) { Write-Log "WARNING: restart commands: $p" }
+    foreach ($w in $read.Warnings) { Write-Log "WARNING: restart commands: $w" }  # no note; see Read-RestartCommands
     if ($problems) { Show-Note 'A restart command has a problem. See the log.' }
 }
 
