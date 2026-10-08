@@ -1,5 +1,7 @@
 {
     "Commands": [
+    ],
+    "Examples": [
         {
             "Name": "LG HUB",
             "Stop": [ "lghub_system_tray", "lghub_agent", "lghub" ],

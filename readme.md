@@ -101,7 +101,7 @@ Some apps stop working correctly until you restart them. For example, the custom
 To add a command:
 
 1. Open the menu and select Restart an app > Edit the list....
-2. Add or change a command in Notepad. The first time, the file contains the LG HUB example.
+2. Add or change a command in the `Commands` list in Notepad. The first time, the `Commands` list is empty, and the LG HUB command is in the `Examples` list. The app does not use the `Examples` list. To use an example, move it into `Commands`.
 3. Save the file.
 
 The app reads the file again in 10 seconds, or when you open the menu. You do not have to restart the app.
@@ -132,20 +132,29 @@ The list is in `%LOCALAPPDATA%\Hibearnate\restart-commands.json`:
 | `WaitSeconds` | No | The time to wait between the stop and the start, from 0 to 30 seconds. The default is 2. Some apps need this time to release their devices. |
 | `Hotkey` | No | A global hotkey, for example `Ctrl+Alt+Shift+L`. Use one key and one or more of `Ctrl`, `Alt`, `Shift`, and `Win`. |
 
-To find the start command of an app that starts at login, look in Task Manager > Startup apps (right-click a column heading and add the Command line column), or in the registry at `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+To find the start command of an app that starts at login, look in Task Manager > Startup apps (right-click a column heading and add the Command line column), or in the registry at `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. The command line is a program path in quotes, followed by the arguments. Put the path in `Start` without the quotes, and put the rest in `Arguments`.
 
-The app stops the names in the order of the list. Put a launcher first, so it cannot start its child processes again during the stop. The app continues to stop processes until no process with a name in the list runs. If a process starts again, the app stops it again. After 10 seconds, the app stops and writes the names of the processes that still run to the log. When all the processes are stopped, the app waits for `WaitSeconds`, and then it starts the program.
+The app stops the names in the order of the list. Put a launcher first, so it cannot start its child processes again during the stop. The app continues to stop processes until no process with a name in the list runs. If a process starts again, the app stops it again. After 10 seconds, the app stops these tries and writes the names of the processes that still run to the log. When all the processes are stopped, the app waits for `WaitSeconds`, and then it starts the program.
+
+If a process does not stop, the app does not start the program. This prevents a second copy of the app next to a copy that does not respond. The notification and the log tell you which process did not stop. Do not put a process in `Stop` that the app cannot stop, such as `lghub_updater`. If you do, the command never starts the program.
 
 Task Manager shows other names on the Processes tab. For LG HUB, "LGHUB Agent" is `lghub_agent`, "G HUB" is `lghub`, and "LGHUB Updater" is `lghub_updater`. Use the names from the Details tab.
 
-Each restart writes a line to the log and shows a notification. If a process does not stop, or the program does not start, the notification tells you to look in the log.
+Each restart writes a line to the log and shows a notification. If a process does not stop, or the program does not start, the notification tells you to look in the log. The tray menu and the other hotkeys work during a restart. The app does one restart at a time.
 
 Some limits:
 
 - The app cannot stop a process that runs as administrator, as SYSTEM, or as a service. Admin rights are necessary for this. For example, `lghub_updater` is part of a service, so the LG HUB command does not stop it.
-- The app never stops itself or the console host that runs it.
+- The app never stops itself or the process that started it. A command cannot stop `conhost` or `OpenConsole`, because the app runs in a console host, and a stop of the console host also stops the app.
 - If another app uses the hotkey, the menu shows "(hotkey unavailable)". The menu item still works.
-- If the file has an error, the app shows a notification and writes the error to the log. A command with an error is not in the menu. The other commands stay.
+- The `Hotkey` cannot use a modifier key, such as `ShiftKey` or `LWin`, as its key.
+
+If the file has an error, the app shows a notification and writes the error to the log. The result depends on the error:
+
+- If the app cannot read the file, for example because of a JSON syntax error, the menu shows no commands.
+- If a command has no `Name`, no `Stop` names, a wildcard or a path in `Stop`, or a console host in `Stop`, the command is not in the menu. The other commands stay.
+- If a `Hotkey` is not correct, the command stays in the menu without a hotkey.
+- If a `WaitSeconds` is not correct, the app uses 2.
 
 ## How it works
 
