@@ -1,7 +1,8 @@
 <#
 .SYNOPSIS
     Tray app that switches Windows power settings between Away, Keep Working
-    and Auto, and restarts Explorer on Ctrl+Alt+Shift+E.
+    and Auto, restarts Explorer on Ctrl+Alt+Shift+E, and restarts other apps
+    from a list in restart-commands.json.
 
 .DESCRIPTION
     Away (applied at every launch): closing the lid hibernates, idle standby
@@ -24,8 +25,8 @@
 
 .PARAMETER SelfTest
     Run the checks that need no tray (settings round trip, Claude activity
-    sample, dashboard read), print the results and exit. Leaves the machine
-    in the Away profile.
+    sample, dashboard read, restart-command list with its problems), print
+    the results and exit. Leaves the machine in the Away profile.
 
 .PARAMETER TraceAuto
     Log the Auto inputs on every poll, to tune the CPU threshold.
@@ -63,6 +64,9 @@ $Config = @{
 }
 $LogPath = Join-Path $Config.LogDir 'power-profiles.log'
 $BaselinePath = Join-Path $Config.LogDir 'baseline.json'
+# Per user and outside the repo, so a pull never overwrites it. "Edit the
+# list" creates it from restart-commands.example.json.
+$CommandsPath = Join-Path $Config.LogDir 'restart-commands.json'
 
 $SUB_BUTTONS = [guid]'4f971e89-eebd-4455-a8de-9e59040e7347'
 $SUB_SLEEP   = [guid]'238c9fa8-0aad-41ed-83f4-97be242c8f20'
@@ -202,6 +206,148 @@ function Set-PowerProfile([string]$Name) {
     return $failed
 }
 
+$NotHotkeyKeys = @(
+    'ShiftKey', 'LShiftKey', 'RShiftKey', 'ControlKey', 'LControlKey', 'RControlKey',
+    'Menu', 'LMenu', 'RMenu', 'LWin', 'RWin',
+    'LButton', 'RButton', 'MButton', 'XButton1', 'XButton2'
+)
+# A stop of the console host that runs this app would end the app without any
+# exit path (see Get-ProtectedPids), so no restart command may name one.
+$ConsoleHostNames = @('conhost', 'OpenConsole')
+
+# Turns "Ctrl+Alt+Shift+L" into @{ Modifiers; Key; Text }, or $null when the
+# text is not one key plus at least one modifier. A bare key is refused: as a
+# global hotkey it would stop working in every other app.
+function ConvertTo-Hotkey([string]$Text) {
+    $mods = 0
+    $key = $null
+    foreach ($part in ($Text -split '\+')) {
+        $part = $part.Trim()
+        if ($part -match '^(ctrl|control)$') { $mods = $mods -bor [Hibearnate.MessageWindow]::MOD_CONTROL }
+        elseif ($part -eq 'alt') { $mods = $mods -bor [Hibearnate.MessageWindow]::MOD_ALT }
+        elseif ($part -eq 'shift') { $mods = $mods -bor [Hibearnate.MessageWindow]::MOD_SHIFT }
+        elseif ($part -match '^win(dows)?$') { $mods = $mods -bor [Hibearnate.MessageWindow]::MOD_WIN }
+        elseif ($null -eq $key -and $part -match '^([a-z]\w*|\d)$') {
+            # A lone digit is the number row (Keys.D1); casting '1' itself
+            # would give the enum value 1, the left mouse button.
+            $name = if ($part -match '^\d$') { "D$part" } else { $part }
+            # Enum.Parse with ignoreCase: a plain [Keys] cast rejects 'f11'.
+            try { $key = [System.Enum]::Parse([System.Windows.Forms.Keys], $name, $true) } catch { return $null }
+            if ([int]($key -band [System.Windows.Forms.Keys]::Modifiers) -ne 0) { return $null }
+            # Virtual-key codes only, and no modifier or mouse button as the
+            # key: "Ctrl+ShiftKey" would take Ctrl+Shift from every other app.
+            if ([int]$key -lt 1 -or [int]$key -gt 254) { return $null }
+            if ($NotHotkeyKeys -contains "$key") { return $null }
+        }
+        else { return $null }
+    }
+    if ($null -eq $key -or $mods -eq 0) { return $null }
+    $label = @()
+    if ($mods -band [Hibearnate.MessageWindow]::MOD_CONTROL) { $label += 'Ctrl' }
+    if ($mods -band [Hibearnate.MessageWindow]::MOD_ALT) { $label += 'Alt' }
+    if ($mods -band [Hibearnate.MessageWindow]::MOD_SHIFT) { $label += 'Shift' }
+    if ($mods -band [Hibearnate.MessageWindow]::MOD_WIN) { $label += 'Win' }
+    $label += "$key" -replace '^D(\d)$', '$1'
+    return @{ Modifiers = [uint32]$mods; Key = $key; Text = $label -join '+' }
+}
+
+# True when a restart command's Start cannot be a program that Start-Process
+# runs: a full path with no file there (a folder only opens File Explorer), a
+# variable that ExpandEnvironmentVariables left as text because it is not
+# set, a relative path with a folder part (it would depend on this app's
+# working directory), or text that is not a valid path at all (a pasted
+# command line in quotes makes IsPathRooted throw). A bare name such as
+# notepad.exe, and a URI such as ms-settings:display, are never "missing":
+# Windows finds those itself, and PATH or App Paths cannot be checked here.
+function Test-StartMissing([string]$Start) {
+    if (-not $Start) { return $false }
+    if ($Start -match '^[a-z][a-z0-9+.-]+:') { return $false }  # a URI scheme; "C:" has one letter
+    if ($Start -match '%[^%\\/]+%') { return $true }
+    try {
+        if ([System.IO.Path]::IsPathRooted($Start)) {
+            return -not (Test-Path -LiteralPath $Start -PathType Leaf)
+        }
+        return $Start -match '[\\/]'
+    } catch {
+        return $true
+    }
+}
+
+# Reads restart-commands.json. Returns @{ Commands; Problems; Warnings }. A
+# missing file is not a problem: it only means no commands yet. An entry with
+# a problem is left out (a bad hotkey only drops the hotkey, a bad WaitSeconds
+# becomes 2), and the others still load. Warnings are for log only (a Start
+# program that is not installed yet). An "Examples" list is ignored.
+function Read-RestartCommands {
+    $result = @{ Commands = @(); Problems = @(); Warnings = @() }
+    if (-not (Test-Path -LiteralPath $CommandsPath)) { return $result }
+    try {
+        # -Encoding UTF8 reads the file with or without a BOM; Notepad saves without one.
+        $data = Get-Content -LiteralPath $CommandsPath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        $result.Problems += "cannot read the file: $($_.Exception.Message)"
+        return $result
+    }
+    if ($null -eq $data -or $null -eq $data.PSObject.Properties['Commands']) {
+        $result.Problems += 'the file has no "Commands" list'
+        return $result
+    }
+    $index = 0
+    foreach ($entry in @($data.Commands)) {
+        $index++
+        $name = "$($entry.Name)".Trim()
+        if (-not $name) {
+            $result.Problems += "command $index has no Name"
+            continue
+        }
+        # Exact image names only. A wildcard could reach far more than meant,
+        # for example a SYSTEM service that shares the prefix.
+        $stop = @(@($entry.Stop) | ForEach-Object { "$_".Trim() -replace '\.exe$', '' } | Where-Object { $_ })
+        if (-not $stop) {
+            $result.Problems += "'$name' has no process names in Stop"
+            continue
+        }
+        $bad = @($stop | Where-Object { $_ -match '[\\/:*?"<>|\[\]]' })
+        if ($bad) {
+            $result.Problems += "'$name' has a path or a wildcard in Stop: $($bad -join ', ')"
+            continue
+        }
+        $consoles = @($stop | Where-Object { $ConsoleHostNames -contains $_ })
+        if ($consoles) {
+            $result.Problems += "'$name' names a console host in Stop ($($consoles -join ', ')); stopping it could end Hibearnate"
+            continue
+        }
+        $wait = 2
+        if ($null -ne $entry.WaitSeconds) {
+            if ($entry.WaitSeconds -is [ValueType] -and $entry.WaitSeconds -isnot [bool] -and
+                $entry.WaitSeconds -ge 0 -and $entry.WaitSeconds -le 30) {
+                $wait = [double]$entry.WaitSeconds
+            } else {
+                $result.Problems += "'$name' has a WaitSeconds that is not a number from 0 to 30; using 2"
+            }
+        }
+        $hotkey = $null
+        if ("$($entry.Hotkey)".Trim()) {
+            $hotkey = ConvertTo-Hotkey $entry.Hotkey
+            if (-not $hotkey) { $result.Problems += "'$name' has a Hotkey that is not valid: $($entry.Hotkey)" }
+        }
+        $start = [Environment]::ExpandEnvironmentVariables("$($entry.Start)".Trim())
+        # Kept in the menu and logged only, with no notification: the program
+        # may be installed later, and a note on every edit of the file until
+        # then would be noise. The restart itself stops nothing meanwhile.
+        if (Test-StartMissing $start) { $result.Warnings += "'$name' has a Start that is not a program file: $start" }
+        $result.Commands += [pscustomobject]@{
+            Name        = $name
+            Stop        = $stop
+            Start       = $start
+            Arguments   = "$($entry.Arguments)".Trim()
+            WaitSeconds = $wait
+            Hotkey      = $hotkey
+        }
+    }
+    return $result
+}
+
 function Get-DashboardWorking {
     if (-not $Config.DashboardUrl) { return -1 }  # signal turned off
     try {
@@ -268,6 +414,15 @@ if ($SelfTest) {
         "  per session (pid:cpu+spawns): $($sample.Detail)"
         "Dashboard Working cards (fresh): $(Get-DashboardWorking)"
         "Idle for: $(Format-Span ([Hibearnate.UserIdle]::Get()))"
+        $restart = Read-RestartCommands
+        "Restart commands: $(@($restart.Commands).Count) in $CommandsPath"
+        foreach ($c in $restart.Commands) {
+            '  {0}: stop {1}; start {2}; hotkey {3}' -f $c.Name, ($c.Stop -join ', '),
+                $(if ($c.Start) { "$($c.Start) $($c.Arguments)".Trim() } else { '(none)' }),
+                $(if ($c.Hotkey) { $c.Hotkey.Text } else { '(none)' })
+        }
+        foreach ($p in $restart.Problems) { "  PROBLEM: $p" }
+        foreach ($w in $restart.Warnings) { "  WARNING: $w" }
     } finally {
         # Release and close the handle: in an interactive shell the process
         # lives on, and an open handle would outlive this run.
@@ -622,6 +777,9 @@ function Invoke-Poll {
     Test-Battery
     Test-PendingHibernate
     Update-Tray
+    # Not while the menu is open: the rebuild disposes the submenu items under
+    # the pointer. The menu's Opening event and the next poll pick it up.
+    if (-not $Menu.Visible) { Sync-RestartCommands }
 }
 
 # ---------------------------------------------------------------- Explorer restart
@@ -658,6 +816,264 @@ function Restart-Explorer {
     Write-Log "Explorer restart: $before; $wake; $display"
 }
 
+# ---------------------------------------------------------------- app restarts
+
+$ExplorerHotkeyId = 1
+$RestartHotkeyBase = 100  # restart command N gets hotkey id 100 + N
+$RestartList = @{
+    Loaded   = $false
+    Stamp    = $null  # LastWriteTimeUtc of the file when it was last read
+    ByHotkey = @{}    # registered hotkey id -> command
+}
+
+# This app and the process that started it. Stopping the console that runs
+# this app would end it without any exit path, so Read-RestartCommands also
+# refuses console host names outright; this covers a parent with another
+# name (a terminal window). If the lookup fails, only $PID is protected, and
+# the name check still holds.
+function Get-ProtectedPids {
+    $ids = @($PID)
+    try {
+        $parentId = (Get-CimInstance Win32_Process -Filter "ProcessId = $PID").ParentProcessId
+        $parent = Get-Process -Id $parentId -ErrorAction Stop
+        # A parent ID can be reused after the parent exits. Only a process
+        # that started before this one can be the real parent.
+        if ($parent.StartTime -lt (Get-Process -Id $PID).StartTime) { $ids += $parent.Id }
+    } catch {
+        # The parent exited or denies access; it cannot be our console then.
+    }
+    return $ids
+}
+
+# The restart in progress, or $null. A restart runs as a chain of ticks of
+# its own timer, never as one blocking call: the stop can take 10 seconds and
+# the pause 30 more, and a blocked UI thread would miss the exit event
+# (Uninstall.ps1 kills the app by force after 20 seconds) and WM_ENDSESSION,
+# leaving Keep Working values in the plan.
+$Restart = @{ Run = $null }
+$RestartTimer = New-Object System.Windows.Forms.Timer
+$RestartTimer.add_Tick({
+    $RestartTimer.Stop()
+    Invoke-RestartStep
+})
+
+# Runs one Step-RestartCommand and ends the restart cleanly if it throws. The
+# first step (from Invoke-RestartCommand) and every tick go through here, so a
+# failure can never leave $Restart.Run set with no timer running, which would
+# refuse every later restart. The name is read before the step, because the
+# last step clears $Restart.Run before it calls Complete-RestartCommand.
+function Invoke-RestartStep {
+    $name = if ($Restart.Run) { $Restart.Run.Command.Name } else { 'An app' }
+    try {
+        Step-RestartCommand
+    } catch {
+        $RestartTimer.Stop()
+        $Restart.Run = $null
+        Write-Log "ERROR in restart of ${name}: $_"
+        Show-Note "Restart of $name failed. See the log."
+    }
+}
+
+# Starts a restart: stop every process of the command, wait until no process
+# with a listed name is left, pause WaitSeconds, then start the program (only
+# when every listed process stopped). One
+# restart at a time; a second request while one runs only shows a note.
+function Invoke-RestartCommand($Command) {
+    if ($Restart.Run) {
+        Show-Note "$($Restart.Run.Command.Name) is still restarting."
+        return
+    }
+    # Stop nothing when the program cannot start: a stop followed by a failed
+    # start leaves the app down.
+    if (Test-StartMissing $Command.Start) {
+        Write-Log "Restart $($Command.Name): not run, because Start is not a program file: $($Command.Start)"
+        Show-Note "$($Command.Name) was not restarted, because its Start program was not found. See the log."
+        return
+    }
+    $Restart.Run = @{
+        Command      = $Command
+        Protected    = Get-ProtectedPids
+        Killed       = @{}     # pid -> Process, stopped by this run
+        Refused      = @{}     # pid -> why Kill failed; not tried again
+        StoppedNames = @()
+        Left         = @()     # still running when the stop phase ended
+        Deadline     = (Get-Date).AddSeconds(10)
+        Paused       = $false
+    }
+    Invoke-RestartStep
+}
+
+# One tick of the restart in $Restart.Run. A stop pass stops the names in the
+# listed order, so a launcher listed first cannot start its children again in
+# between; a process that appears anyway (restarted by a parent that was not
+# listed) is caught by the next pass, 250 ms later. When none is left, or after
+# 10 seconds, the next tick comes after WaitSeconds: the pause gives the app
+# time to let go of its devices (LG HUB started at once after the stop
+# sometimes left the mouse buttons dead). The tick after that completes it.
+function Step-RestartCommand {
+    $run = $Restart.Run
+    if (-not $run) { return }
+    if (-not $run.Paused) {
+        $left = @(foreach ($name in $run.Command.Stop) {
+            Get-Process -Name $name -ErrorAction SilentlyContinue | Where-Object {
+                $id = $_.Id
+                $run.Protected -notcontains $id -and -not $run.Refused.ContainsKey($id) -and
+                    -not ($run.Killed.ContainsKey($id) -and $(try { $run.Killed[$id].HasExited } catch { $false }))
+            }
+        })
+        if ($left -and (Get-Date) -lt $run.Deadline) {
+            foreach ($p in $left) {
+                if ($run.Killed.ContainsKey($p.Id)) { continue }  # stopping; wait for it
+                try {
+                    $p.Kill()
+                    $run.Killed[$p.Id] = $p
+                    $run.StoppedNames += $p.ProcessName
+                } catch {
+                    # Kill also throws when the process exited on its own (for
+                    # example a child of a launcher stopped just before).
+                    $gone = try { $p.HasExited } catch { $false }
+                    if (-not $gone) {
+                        $run.Refused[$p.Id] = '{0} ({1}) not stopped: {2}' -f $p.ProcessName, $p.Id, $_.Exception.GetBaseException().Message
+                    }
+                }
+            }
+            $RestartTimer.Interval = 250
+            $RestartTimer.Start()
+            return
+        }
+        $run.Left = $left
+        $run.Paused = $true
+        # No pause when a process did not stop: Complete-RestartCommand then
+        # skips the start, so there is nothing to wait for.
+        $stuck = $left -or $run.Refused.Count -gt 0
+        if ($run.StoppedNames -and $run.Command.Start -and $run.Command.WaitSeconds -gt 0 -and -not $stuck) {
+            # Ceiling, not [int]: 0.0004 s would round to 0 ms, and Interval throws on 0.
+            $RestartTimer.Interval = [int][math]::Ceiling($run.Command.WaitSeconds * 1000)
+            $RestartTimer.Start()
+            return
+        }
+    }
+    $Restart.Run = $null
+    Complete-RestartCommand $run
+}
+
+# The start, the log line and the note at the end of a restart. Fails closed:
+# when a listed process refused to stop or still runs, the program is not
+# started, so a second copy never runs beside a stuck one.
+function Complete-RestartCommand($Run) {
+    $Command = $Run.Command
+    $failed = @($Run.Refused.Values)
+    if ($Run.Left) {
+        $failed += 'still running after 10 s: ' + (($Run.Left | ForEach-Object { '{0} ({1})' -f $_.ProcessName, $_.Id }) -join ', ')
+    }
+    $stoppedNames = $Run.StoppedNames
+    $stopped = $Run.Killed.Count -gt 0
+
+    $parts = @()
+    $parts += if ($stoppedNames) {
+        'stopped ' + (($stoppedNames | Group-Object | ForEach-Object {
+            if ($_.Count -gt 1) { '{0} x{1}' -f $_.Name, $_.Count } else { $_.Name }
+        }) -join ', ')
+    } else { 'stopped nothing' }
+
+    if ($Command.Start -and $failed) {
+        $parts += 'not started, because a process did not stop'
+    } elseif ($Command.Start) {
+        try {
+            $startArgs = @{ FilePath = $Command.Start }
+            if ($Command.Arguments) { $startArgs.ArgumentList = $Command.Arguments }
+            # Many apps expect to start in their own directory.
+            if ([System.IO.Path]::IsPathRooted($Command.Start)) {
+                $dir = Split-Path -Parent $Command.Start
+                if ($dir -and (Test-Path -LiteralPath $dir)) { $startArgs.WorkingDirectory = $dir }
+            }
+            Start-Process @startArgs
+            $parts += "started $($Command.Start) $($Command.Arguments)".Trim()
+        } catch {
+            $failed += "start failed: $($_.Exception.Message)"
+        }
+    }
+
+    Write-Log ("Restart $($Command.Name): " + ((@($parts) + @($failed)) -join '; '))
+    if ($Command.Start -and $parts -contains 'not started, because a process did not stop') {
+        Show-Note "$($Command.Name) was not started, because a process did not stop. See the log."
+    } elseif ($failed) {
+        Show-Note "Restart $($Command.Name): something did not work. See the log."
+    } elseif ($Command.Start) {
+        Show-Note "Restarted $($Command.Name)."
+    } elseif ($stopped) {
+        Show-Note "Stopped $($Command.Name)."
+    } else {
+        Show-Note "$($Command.Name) was not running."
+    }
+}
+
+# Creates the list from restart-commands.example.json the first time. The
+# example keeps its commands under "Examples", which Read-RestartCommands
+# ignores, so a new list registers no hotkey until the user moves a command
+# into "Commands" and saves.
+function Edit-RestartCommands {
+    if (-not (Test-Path -LiteralPath $CommandsPath)) {
+        if (-not (Test-Path $Config.LogDir)) {
+            New-Item -ItemType Directory -Path $Config.LogDir -Force | Out-Null
+        }
+        $example = Join-Path $PSScriptRoot 'restart-commands.example.json'
+        if (Test-Path -LiteralPath $example) {
+            Copy-Item -LiteralPath $example -Destination $CommandsPath
+        } else {
+            Set-Content -LiteralPath $CommandsPath -Value '{ "Commands": [] }' -Encoding UTF8
+        }
+        Write-Log "Created $CommandsPath"
+    }
+    Start-Process notepad.exe -ArgumentList "`"$CommandsPath`""
+}
+
+# Reads the file again when it changed since the last read, then rebuilds the
+# submenu and the hotkeys. Called on every poll and when the menu opens, so
+# an edit takes effect without a restart of the app. Problems are reported
+# once per change of the file, not on every call.
+function Sync-RestartCommands {
+    $stamp = if (Test-Path -LiteralPath $CommandsPath) { (Get-Item -LiteralPath $CommandsPath).LastWriteTimeUtc } else { $null }
+    if ($RestartList.Loaded -and $stamp -eq $RestartList.Stamp) { return }
+    $RestartList.Loaded = $true
+    $RestartList.Stamp = $stamp
+
+    $read = Read-RestartCommands
+    $problems = @($read.Problems)
+
+    foreach ($id in @($RestartList.ByHotkey.Keys)) { $Window.UnregisterHotkey($id) }
+    $RestartList.ByHotkey = @{}
+    $old = @($MenuRestart.DropDownItems)
+    $MenuRestart.DropDownItems.Clear()
+    foreach ($item in $old) { if ($item -ne $MenuEditList) { $item.Dispose() } }
+
+    $i = 0
+    foreach ($command in $read.Commands) {
+        $item = New-Object System.Windows.Forms.ToolStripMenuItem $command.Name
+        $item.Tag = $command
+        $item.add_Click({ param($s, $e) try { Invoke-RestartCommand $s.Tag } catch { Write-Log "ERROR: $_" } })
+        if ($command.Hotkey) {
+            $id = $RestartHotkeyBase + $i
+            if ($Window.RegisterHotkey($id, $command.Hotkey.Modifiers, $command.Hotkey.Key)) {
+                $RestartList.ByHotkey[$id] = $command
+                $item.ShortcutKeyDisplayString = $command.Hotkey.Text
+            } else {
+                $problems += "$($command.Hotkey.Text) for '$($command.Name)' is taken by another app or command"
+                $item.ShortcutKeyDisplayString = '(hotkey unavailable)'
+            }
+        }
+        [void]$MenuRestart.DropDownItems.Add($item)
+        $i++
+    }
+    if ($read.Commands) { [void]$MenuRestart.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator)) }
+    [void]$MenuRestart.DropDownItems.Add($MenuEditList)
+
+    if ($null -ne $stamp) { Write-Log "Restart commands: $(@($read.Commands).Count) loaded from $CommandsPath" }
+    foreach ($p in $problems) { Write-Log "WARNING: restart commands: $p" }
+    foreach ($w in $read.Warnings) { Write-Log "WARNING: restart commands: $w" }  # no note; see Read-RestartCommands
+    if ($problems) { Show-Note 'A restart command has a problem. See the log.' }
+}
+
 # ---------------------------------------------------------------- menu
 
 $Menu = New-Object System.Windows.Forms.ContextMenuStrip
@@ -681,6 +1097,11 @@ $MenuExplorer = New-Object System.Windows.Forms.ToolStripMenuItem 'Restart Explo
 $MenuExplorer.ShortcutKeyDisplayString = 'Ctrl+Alt+Shift+E'
 $MenuExplorer.add_Click({ try { Restart-Explorer } catch { Write-Log "ERROR: $_" } })
 
+# Filled from restart-commands.json by Sync-RestartCommands.
+$MenuRestart = New-Object System.Windows.Forms.ToolStripMenuItem 'Restart an app'
+$MenuEditList = New-Object System.Windows.Forms.ToolStripMenuItem 'Edit the list...'
+$MenuEditList.add_Click({ try { Edit-RestartCommands } catch { Write-Log "ERROR: $_" } })
+
 $MenuLog = New-Object System.Windows.Forms.ToolStripMenuItem 'Open log'
 $MenuLog.add_Click({ if (Test-Path $LogPath) { Start-Process notepad.exe $LogPath } })
 
@@ -692,6 +1113,8 @@ $MenuLog.add_Click({ if (Test-Path $LogPath) { Start-Process notepad.exe $LogPat
 function Stop-App([string]$Why) {
     try { Set-Effective 'Away' 'exit'; Write-Log "Exit: $Why" } catch { Write-Log "ERROR on exit: $_" }
     $Timer.Stop()
+    $RestartTimer.Stop()
+    if ($Restart.Run) { Write-Log "Restart $($Restart.Run.Command.Name) canceled by exit" }
     $Window.Dispose()
     $Tray.Visible = $false
     [System.Windows.Forms.Application]::Exit()
@@ -703,12 +1126,16 @@ $MenuExit.add_Click({ Stop-App 'menu' })
 [void]$Menu.Items.AddRange(@(
     $MenuAway, $MenuKeep, $MenuAuto,
     (New-Object System.Windows.Forms.ToolStripSeparator),
-    $MenuExplorer, $MenuLog,
+    $MenuExplorer, $MenuRestart, $MenuLog,
     (New-Object System.Windows.Forms.ToolStripSeparator),
     $MenuExit
 ))
 $Tray.ContextMenuStrip = $Menu
-$Menu.add_Opening({ try { Update-Tray } catch { Write-Log "ERROR: $_" } })  # fresh "time left" when the menu opens
+$Menu.add_Opening({
+    # Fresh "time left", and restart commands saved since the last poll.
+    try { Sync-RestartCommands } catch { Write-Log "ERROR: $_" }
+    try { Update-Tray } catch { Write-Log "ERROR: $_" }
+})
 
 # Left click opens the same menu as right click. NotifyIcon only exposes this
 # through a private method.
@@ -722,11 +1149,17 @@ $Tray.add_MouseClick({
 
 $Window = New-Object Hibearnate.MessageWindow
 $mods = [Hibearnate.MessageWindow]::MOD_CONTROL -bor [Hibearnate.MessageWindow]::MOD_ALT -bor [Hibearnate.MessageWindow]::MOD_SHIFT
-if (-not $Window.RegisterHotkey($mods, [System.Windows.Forms.Keys]::E)) {
+if (-not $Window.RegisterHotkey($ExplorerHotkeyId, $mods, [System.Windows.Forms.Keys]::E)) {
     Write-Log 'WARNING: Ctrl+Alt+Shift+E is taken by another app; the hotkey is off. Use the tray menu.'
     $MenuExplorer.ShortcutKeyDisplayString = '(hotkey unavailable)'
 }
-$Window.add_HotkeyPressed({ try { Restart-Explorer } catch { Write-Log "ERROR: $_" } })
+$Window.add_HotkeyPressed({
+    param($s, $e)
+    try {
+        if ($e.Id -eq $ExplorerHotkeyId) { Restart-Explorer }
+        elseif ($RestartList.ByHotkey.ContainsKey($e.Id)) { Invoke-RestartCommand $RestartList.ByHotkey[$e.Id] }
+    } catch { Write-Log "ERROR: $_" }
+})
 $Window.add_LidChanged({
     try {
         Write-Log $(if ($Window.LidOpen) { 'Lid opened' } else { 'Lid closed' })
@@ -776,6 +1209,7 @@ try {
 }
 Set-Effective 'Away' 'launch'
 Update-Tray
+try { Sync-RestartCommands } catch { Write-Log "ERROR loading restart commands: $_" }
 $Timer.Start()
 
 try {

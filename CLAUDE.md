@@ -1,6 +1,6 @@
 # Hibearnate — notes for Claude
 
-A Windows tray app (`Hibearnate.ps1` plus the C# helper `Hibearnate.cs`) that switches power settings between Away, Keep Working and Auto, and restarts Explorer on Ctrl+Alt+Shift+E. `readme.md` describes the behavior; this file lists the constraints a change or a review must respect.
+A Windows tray app (`Hibearnate.ps1` plus the C# helper `Hibearnate.cs`) that switches power settings between Away, Keep Working and Auto, restarts Explorer on Ctrl+Alt+Shift+E, and restarts other apps from a per-user list (`%LOCALAPPDATA%\Hibearnate\restart-commands.json`, seeded from `restart-commands.example.json`). `readme.md` describes the behavior; this file lists the constraints a change or a review must respect.
 
 ## Runtime constraints
 
@@ -14,6 +14,10 @@ A Windows tray app (`Hibearnate.ps1` plus the C# helper `Hibearnate.cs`) that sw
 - **Keep Working writes values that outlive the process** (lid action 0, sleep-after 0). Every exit path that runs code must put Away back: the Exit menu item, the `WM_ENDSESSION` handler, the `finally` around `Application.Run`, and the exit event that `Uninstall.ps1` sets. A new exit path must do the same.
 - **The single-instance check uses `Mutex.WaitOne(0)`, not the constructor's `createdNew`.** `createdNew` only reports whether the name already existed, so a leaked handle would block every later start.
 - **All UI and power work runs on the tray's UI thread.** PowerShell scriptblocks cannot run on a thread pool or `SystemEvents` thread; events reach PowerShell through `MessageWindow.WndProc` for that reason.
+- **Hotkey ids are partitioned.** Id 1 is the Explorer hotkey; restart command N uses id 100 + N. `Sync-RestartCommands` unregisters every command hotkey before it registers the new set, so a reload never leaks a registration.
+- **A restart command never stops this process or its console host.** `Read-RestartCommands` refuses `conhost` and `OpenConsole` by name, and `Get-ProtectedPids` protects `$PID` and its parent. Killing the headless `conhost.exe` would end the tray without running any exit path, and leave Keep Working values in the plan.
+- **A restart never blocks the UI thread.** It runs as ticks of `$RestartTimer` (250 ms stop passes, then one `WaitSeconds` tick), so the exit event, `WM_ENDSESSION` and the poll keep running. Do not put `Start-Sleep` or a long wait back into it.
+- **Restart-command process names are exact.** Wildcards are rejected on purpose: `lghub*` would also match a SYSTEM service process.
 - **The tray tooltip must stay at 63 characters or fewer.** `NotifyIcon.Text` throws above that; `Update-Tray` truncates.
 
 ## PowerShell traps already hit here

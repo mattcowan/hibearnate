@@ -1,0 +1,14 @@
+{
+    "Commands": [
+    ],
+    "Examples": [
+        {
+            "Name": "LG HUB",
+            "Stop": [ "lghub_system_tray", "lghub_agent", "lghub" ],
+            "Start": "C:\\Program Files\\LGHUB\\system_tray\\lghub_system_tray.exe",
+            "Arguments": "--minimized",
+            "WaitSeconds": 2,
+            "Hotkey": "Ctrl+Alt+Shift+L"
+        }
+    ]
+}
