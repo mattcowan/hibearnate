@@ -140,7 +140,9 @@ If a process does not stop, the app does not start the program. This prevents a 
 
 Task Manager shows other names on the Processes tab. For LG HUB, "LGHUB Agent" is `lghub_agent`, "G HUB" is `lghub`, and "LGHUB Updater" is `lghub_updater`. Use the names from the Details tab.
 
-Each restart writes a line to the log and shows a notification. If a process does not stop, or the program does not start, the notification tells you to look in the log. The tray menu and the other hotkeys work during a restart. The app does one restart at a time.
+Each restart writes a line to the log and shows a notification. If a process does not stop, or the program does not start, the notification tells you to look in the log. The tray menu and the other hotkeys work during a restart. The app does one restart at a time. If you exit Hibearnate during a restart, the app does not start the program.
+
+If `Start` is a full path and the program is not there, the app stops nothing and shows a notification. This prevents a stop that the app cannot undo.
 
 Some limits:
 
@@ -155,6 +157,7 @@ If the file has an error, the app shows a notification and writes the error to t
 - If a command has no `Name`, no `Stop` names, a wildcard or a path in `Stop`, or a console host in `Stop`, the command is not in the menu. The other commands stay.
 - If a `Hotkey` is not correct, the command stays in the menu without a hotkey.
 - If a `WaitSeconds` is not correct, the app uses 2.
+- If `Start` is a full path that does not exist, the command stays in the menu, and the log tells you.
 
 ## How it works
 

@@ -251,6 +251,19 @@ function ConvertTo-Hotkey([string]$Text) {
     return @{ Modifiers = [uint32]$mods; Key = $key; Text = $label -join '+' }
 }
 
+# True when a restart command's Start is a full path that does not exist, or
+# is not a valid path at all (a pasted command line still in quotes makes
+# IsPathRooted throw). A bare name such as notepad.exe is never "missing":
+# Start-Process finds it through PATH.
+function Test-StartMissing([string]$Start) {
+    if (-not $Start) { return $false }
+    try {
+        return [System.IO.Path]::IsPathRooted($Start) -and -not (Test-Path -LiteralPath $Start)
+    } catch {
+        return $true
+    }
+}
+
 # Reads restart-commands.json. Returns @{ Commands; Problems }. A missing file
 # is not a problem: it only means no commands yet. An entry with a problem is
 # left out (a bad hotkey only drops the hotkey, a bad WaitSeconds becomes 2),
@@ -308,10 +321,14 @@ function Read-RestartCommands {
             $hotkey = ConvertTo-Hotkey $entry.Hotkey
             if (-not $hotkey) { $result.Problems += "'$name' has a Hotkey that is not valid: $($entry.Hotkey)" }
         }
+        $start = [Environment]::ExpandEnvironmentVariables("$($entry.Start)".Trim())
+        # Kept in the menu: the program may be installed later. The restart
+        # itself refuses to stop anything while Start is missing.
+        if (Test-StartMissing $start) { $result.Problems += "'$name' has a Start that does not exist: $start" }
         $result.Commands += [pscustomobject]@{
             Name        = $name
             Stop        = $stop
-            Start       = [Environment]::ExpandEnvironmentVariables("$($entry.Start)".Trim())
+            Start       = $start
             Arguments   = "$($entry.Arguments)".Trim()
             WaitSeconds = $wait
             Hotkey      = $hotkey
@@ -748,7 +765,9 @@ function Invoke-Poll {
     Test-Battery
     Test-PendingHibernate
     Update-Tray
-    Sync-RestartCommands
+    # Not while the menu is open: the rebuild disposes the submenu items under
+    # the pointer. The menu's Opening event and the next poll pick it up.
+    if (-not $Menu.Visible) { Sync-RestartCommands }
 }
 
 # ---------------------------------------------------------------- Explorer restart
@@ -823,16 +842,25 @@ $Restart = @{ Run = $null }
 $RestartTimer = New-Object System.Windows.Forms.Timer
 $RestartTimer.add_Tick({
     $RestartTimer.Stop()
+    Invoke-RestartStep
+})
+
+# Runs one Step-RestartCommand and ends the restart cleanly if it throws. The
+# first step (from Invoke-RestartCommand) and every tick go through here, so a
+# failure can never leave $Restart.Run set with no timer running, which would
+# refuse every later restart. The name is read before the step, because the
+# last step clears $Restart.Run before it calls Complete-RestartCommand.
+function Invoke-RestartStep {
+    $name = if ($Restart.Run) { $Restart.Run.Command.Name } else { 'An app' }
     try {
         Step-RestartCommand
     } catch {
-        # Say so: a restart that dies here would otherwise end with no note.
-        $name = if ($Restart.Run) { $Restart.Run.Command.Name } else { 'An app' }
+        $RestartTimer.Stop()
         $Restart.Run = $null
         Write-Log "ERROR in restart of ${name}: $_"
         Show-Note "Restart of $name failed. See the log."
     }
-})
+}
 
 # Starts a restart: stop every process of the command, wait until no process
 # with a listed name is left, pause WaitSeconds, then start the program (only
@@ -841,6 +869,13 @@ $RestartTimer.add_Tick({
 function Invoke-RestartCommand($Command) {
     if ($Restart.Run) {
         Show-Note "$($Restart.Run.Command.Name) is still restarting."
+        return
+    }
+    # Stop nothing when the program cannot start: a stop followed by a failed
+    # start leaves the app down.
+    if (Test-StartMissing $Command.Start) {
+        Write-Log "Restart $($Command.Name): not run, because Start does not exist: $($Command.Start)"
+        Show-Note "$($Command.Name) was not restarted, because its Start program does not exist. See the log."
         return
     }
     $Restart.Run = @{
@@ -853,7 +888,7 @@ function Invoke-RestartCommand($Command) {
         Deadline     = (Get-Date).AddSeconds(10)
         Paused       = $false
     }
-    Step-RestartCommand
+    Invoke-RestartStep
 }
 
 # One tick of the restart in $Restart.Run. A stop pass stops the names in the
