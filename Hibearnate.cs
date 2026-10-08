@@ -139,7 +139,17 @@ namespace Hibearnate
         }
     }
 
-    // Invisible window that receives the global hotkey and the lid and display
+    public class HotkeyEventArgs : EventArgs
+    {
+        public int Id { get; private set; }
+
+        public HotkeyEventArgs(int id)
+        {
+            Id = id;
+        }
+    }
+
+    // Invisible window that receives the global hotkeys and the lid and display
     // power notifications. Its WndProc runs on the thread that created it, so
     // PowerShell event handlers attached here run on the tray's UI thread.
     public class MessageWindow : NativeWindow, IDisposable
@@ -156,21 +166,22 @@ namespace Hibearnate
         public const uint MOD_ALT = 0x1;
         public const uint MOD_CONTROL = 0x2;
         public const uint MOD_SHIFT = 0x4;
+        public const uint MOD_WIN = 0x8;
         private const uint MOD_NOREPEAT = 0x4000;
         private const int WM_HOTKEY = 0x0312;
         private const int WM_ENDSESSION = 0x0016;
         private const int WM_POWERBROADCAST = 0x0218;
         private const int PBT_POWERSETTINGCHANGE = 0x8013;
-        private const int HOTKEY_ID = 1;
 
         private static readonly Guid GUID_LIDSWITCH_STATE_CHANGE = new Guid("BA3E0F4D-B817-4094-A2D1-D56379E6A0F3");
         private static readonly Guid GUID_CONSOLE_DISPLAY_STATE = new Guid("6FE69556-704A-47A0-8F24-C28D936FDA47");
 
         private IntPtr lidNotify = IntPtr.Zero;
         private IntPtr displayNotify = IntPtr.Zero;
-        private bool hotkeyRegistered;
+        private readonly HashSet<int> hotkeyIds = new HashSet<int>();
 
-        public event EventHandler HotkeyPressed;
+        // The Id in the event arguments is the one given to RegisterHotkey.
+        public event EventHandler<HotkeyEventArgs> HotkeyPressed;
         public event EventHandler LidChanged;
         public event EventHandler DisplayChanged;
 
@@ -191,10 +202,28 @@ namespace Hibearnate
             CreateHandle(new CreateParams());
         }
 
-        public bool RegisterHotkey(uint modifiers, Keys key)
+        // Returns false when another app (or another id here) already owns the
+        // key combination. Ids must be between 0 and 0xBFFF.
+        public bool RegisterHotkey(int id, uint modifiers, Keys key)
         {
-            hotkeyRegistered = RegisterHotKey(Handle, HOTKEY_ID, modifiers | MOD_NOREPEAT, (uint)key);
-            return hotkeyRegistered;
+            if (hotkeyIds.Contains(id))
+            {
+                UnregisterHotkey(id);
+            }
+            if (!RegisterHotKey(Handle, id, modifiers | MOD_NOREPEAT, (uint)key))
+            {
+                return false;
+            }
+            hotkeyIds.Add(id);
+            return true;
+        }
+
+        public void UnregisterHotkey(int id)
+        {
+            if (hotkeyIds.Remove(id))
+            {
+                UnregisterHotKey(Handle, id);
+            }
         }
 
         public void RegisterPowerNotifications()
@@ -207,9 +236,13 @@ namespace Hibearnate
 
         protected override void WndProc(ref Message m)
         {
-            if (m.Msg == WM_HOTKEY && m.WParam.ToInt32() == HOTKEY_ID)
+            if (m.Msg == WM_HOTKEY)
             {
-                Raise(HotkeyPressed);
+                EventHandler<HotkeyEventArgs> handler = HotkeyPressed;
+                if (handler != null)
+                {
+                    handler(this, new HotkeyEventArgs(m.WParam.ToInt32()));
+                }
             }
             else if (m.Msg == WM_ENDSESSION && m.WParam != IntPtr.Zero)
             {
@@ -246,11 +279,11 @@ namespace Hibearnate
 
         public void Dispose()
         {
-            if (hotkeyRegistered)
+            foreach (int id in hotkeyIds)
             {
-                UnregisterHotKey(Handle, HOTKEY_ID);
-                hotkeyRegistered = false;
+                UnregisterHotKey(Handle, id);
             }
+            hotkeyIds.Clear();
             if (lidNotify != IntPtr.Zero)
             {
                 UnregisterPowerSettingNotification(lidNotify);

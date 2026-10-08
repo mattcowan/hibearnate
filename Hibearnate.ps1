@@ -1,7 +1,8 @@
 <#
 .SYNOPSIS
     Tray app that switches Windows power settings between Away, Keep Working
-    and Auto, and restarts Explorer on Ctrl+Alt+Shift+E.
+    and Auto, restarts Explorer on Ctrl+Alt+Shift+E, and restarts other apps
+    from a list in restart-commands.json.
 
 .DESCRIPTION
     Away (applied at every launch): closing the lid hibernates, idle standby
@@ -63,6 +64,9 @@ $Config = @{
 }
 $LogPath = Join-Path $Config.LogDir 'power-profiles.log'
 $BaselinePath = Join-Path $Config.LogDir 'baseline.json'
+# Per user and outside the repo, so a pull never overwrites it. "Edit the
+# list" creates it from restart-commands.example.json.
+$CommandsPath = Join-Path $Config.LogDir 'restart-commands.json'
 
 $SUB_BUTTONS = [guid]'4f971e89-eebd-4455-a8de-9e59040e7347'
 $SUB_SLEEP   = [guid]'238c9fa8-0aad-41ed-83f4-97be242c8f20'
@@ -202,6 +206,101 @@ function Set-PowerProfile([string]$Name) {
     return $failed
 }
 
+# Turns "Ctrl+Alt+Shift+L" into @{ Modifiers; Key; Text }, or $null when the
+# text is not one key plus at least one modifier. A bare key is refused: as a
+# global hotkey it would stop working in every other app.
+function ConvertTo-Hotkey([string]$Text) {
+    $mods = 0
+    $key = $null
+    foreach ($part in ($Text -split '\+')) {
+        $part = $part.Trim()
+        if ($part -match '^(ctrl|control)$') { $mods = $mods -bor [Hibearnate.MessageWindow]::MOD_CONTROL }
+        elseif ($part -eq 'alt') { $mods = $mods -bor [Hibearnate.MessageWindow]::MOD_ALT }
+        elseif ($part -eq 'shift') { $mods = $mods -bor [Hibearnate.MessageWindow]::MOD_SHIFT }
+        elseif ($part -match '^win(dows)?$') { $mods = $mods -bor [Hibearnate.MessageWindow]::MOD_WIN }
+        elseif ($null -eq $key -and $part -match '^([a-z]\w*|\d)$') {
+            # A lone digit is the number row (Keys.D1); casting '1' itself
+            # would give the enum value 1, the left mouse button.
+            $name = if ($part -match '^\d$') { "D$part" } else { $part }
+            # Enum.Parse with ignoreCase: a plain [Keys] cast rejects 'f11'.
+            try { $key = [System.Enum]::Parse([System.Windows.Forms.Keys], $name, $true) } catch { return $null }
+            if ([int]($key -band [System.Windows.Forms.Keys]::Modifiers) -ne 0) { return $null }
+        }
+        else { return $null }
+    }
+    if ($null -eq $key -or $mods -eq 0) { return $null }
+    $label = @()
+    if ($mods -band [Hibearnate.MessageWindow]::MOD_CONTROL) { $label += 'Ctrl' }
+    if ($mods -band [Hibearnate.MessageWindow]::MOD_ALT) { $label += 'Alt' }
+    if ($mods -band [Hibearnate.MessageWindow]::MOD_SHIFT) { $label += 'Shift' }
+    if ($mods -band [Hibearnate.MessageWindow]::MOD_WIN) { $label += 'Win' }
+    $label += "$key" -replace '^D(\d)$', '$1'
+    return @{ Modifiers = [uint32]$mods; Key = $key; Text = $label -join '+' }
+}
+
+# Reads restart-commands.json. Returns @{ Commands; Problems }. A missing file
+# is not a problem: it only means no commands yet. An entry with a problem is
+# left out (a bad hotkey only drops the hotkey), and the others still load.
+function Read-RestartCommands {
+    $result = @{ Commands = @(); Problems = @() }
+    if (-not (Test-Path -LiteralPath $CommandsPath)) { return $result }
+    try {
+        # -Encoding UTF8 reads the file with or without a BOM; Notepad saves without one.
+        $data = Get-Content -LiteralPath $CommandsPath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        $result.Problems += "cannot read the file: $($_.Exception.Message)"
+        return $result
+    }
+    if ($null -eq $data -or $null -eq $data.PSObject.Properties['Commands']) {
+        $result.Problems += 'the file has no "Commands" list'
+        return $result
+    }
+    $index = 0
+    foreach ($entry in @($data.Commands)) {
+        $index++
+        $name = "$($entry.Name)".Trim()
+        if (-not $name) {
+            $result.Problems += "command $index has no Name"
+            continue
+        }
+        # Exact image names only. A wildcard could reach far more than meant,
+        # for example a SYSTEM service that shares the prefix.
+        $stop = @(@($entry.Stop) | ForEach-Object { "$_".Trim() -replace '\.exe$', '' } | Where-Object { $_ })
+        if (-not $stop) {
+            $result.Problems += "'$name' has no process names in Stop"
+            continue
+        }
+        $bad = @($stop | Where-Object { $_ -match '[\\/:*?"<>|\[\]]' })
+        if ($bad) {
+            $result.Problems += "'$name' has a path or a wildcard in Stop: $($bad -join ', ')"
+            continue
+        }
+        $wait = 2
+        if ($null -ne $entry.WaitSeconds) {
+            if ($entry.WaitSeconds -is [ValueType] -and $entry.WaitSeconds -isnot [bool] -and
+                $entry.WaitSeconds -ge 0 -and $entry.WaitSeconds -le 30) {
+                $wait = [double]$entry.WaitSeconds
+            } else {
+                $result.Problems += "'$name' has a WaitSeconds that is not a number from 0 to 30; using 2"
+            }
+        }
+        $hotkey = $null
+        if ("$($entry.Hotkey)".Trim()) {
+            $hotkey = ConvertTo-Hotkey $entry.Hotkey
+            if (-not $hotkey) { $result.Problems += "'$name' has a Hotkey that is not valid: $($entry.Hotkey)" }
+        }
+        $result.Commands += [pscustomobject]@{
+            Name        = $name
+            Stop        = $stop
+            Start       = [Environment]::ExpandEnvironmentVariables("$($entry.Start)".Trim())
+            Arguments   = "$($entry.Arguments)".Trim()
+            WaitSeconds = $wait
+            Hotkey      = $hotkey
+        }
+    }
+    return $result
+}
+
 function Get-DashboardWorking {
     if (-not $Config.DashboardUrl) { return -1 }  # signal turned off
     try {
@@ -268,6 +367,14 @@ if ($SelfTest) {
         "  per session (pid:cpu+spawns): $($sample.Detail)"
         "Dashboard Working cards (fresh): $(Get-DashboardWorking)"
         "Idle for: $(Format-Span ([Hibearnate.UserIdle]::Get()))"
+        $restart = Read-RestartCommands
+        "Restart commands: $(@($restart.Commands).Count) in $CommandsPath"
+        foreach ($c in $restart.Commands) {
+            '  {0}: stop {1}; start {2}; hotkey {3}' -f $c.Name, ($c.Stop -join ', '),
+                $(if ($c.Start) { "$($c.Start) $($c.Arguments)".Trim() } else { '(none)' }),
+                $(if ($c.Hotkey) { $c.Hotkey.Text } else { '(none)' })
+        }
+        foreach ($p in $restart.Problems) { "  PROBLEM: $p" }
     } finally {
         # Release and close the handle: in an interactive shell the process
         # lives on, and an open handle would outlive this run.
@@ -622,6 +729,7 @@ function Invoke-Poll {
     Test-Battery
     Test-PendingHibernate
     Update-Tray
+    Sync-RestartCommands
 }
 
 # ---------------------------------------------------------------- Explorer restart
@@ -658,6 +766,178 @@ function Restart-Explorer {
     Write-Log "Explorer restart: $before; $wake; $display"
 }
 
+# ---------------------------------------------------------------- app restarts
+
+$ExplorerHotkeyId = 1
+$RestartHotkeyBase = 100  # restart command N gets hotkey id 100 + N
+$RestartList = @{
+    Loaded   = $false
+    Stamp    = $null  # LastWriteTimeUtc of the file when it was last read
+    ByHotkey = @{}    # registered hotkey id -> command
+}
+
+# This app and the console host that runs it. Stopping the console host
+# would end this app too.
+function Get-ProtectedPids {
+    $ids = @($PID)
+    try {
+        $parentId = (Get-CimInstance Win32_Process -Filter "ProcessId = $PID").ParentProcessId
+        $parent = Get-Process -Id $parentId -ErrorAction Stop
+        # A parent ID can be reused after the parent exits. Only a process
+        # that started before this one can be the real parent.
+        if ($parent.StartTime -lt (Get-Process -Id $PID).StartTime) { $ids += $parent.Id }
+    } catch {
+        # The parent exited or denies access; it cannot be our console then.
+    }
+    return $ids
+}
+
+# Stops every process of the command, waits until no process with a listed
+# name is left, pauses WaitSeconds, then starts the program. Each pass stops
+# the names in the listed order, so a launcher listed first cannot start its
+# children again in between; a process that appears anyway (restarted by a
+# parent that was not listed) is caught by the next pass. The pause gives the
+# app time to let go of its devices: LG HUB started at once after the stop
+# sometimes left the mouse buttons dead. Runs on the UI thread like
+# Restart-Explorer, so the stop is capped at 10 seconds.
+function Invoke-RestartCommand($Command) {
+    $protected = Get-ProtectedPids
+    $killed = @{}    # pid -> Process, stopped by this run
+    $refused = @{}   # pid -> why Kill failed; not tried again
+    $stoppedNames = @()
+    $failed = @()
+    $deadline = (Get-Date).AddSeconds(10)
+    while ($true) {
+        $left = @(foreach ($name in $Command.Stop) {
+            Get-Process -Name $name -ErrorAction SilentlyContinue | Where-Object {
+                $id = $_.Id
+                $protected -notcontains $id -and -not $refused.ContainsKey($id) -and
+                    -not ($killed.ContainsKey($id) -and $(try { $killed[$id].HasExited } catch { $false }))
+            }
+        })
+        if (-not $left -or (Get-Date) -ge $deadline) { break }
+        foreach ($p in $left) {
+            if ($killed.ContainsKey($p.Id)) { continue }  # stopping; wait for it
+            try {
+                $p.Kill()
+                $killed[$p.Id] = $p
+                $stoppedNames += $p.ProcessName
+            } catch {
+                # Kill also throws when the process exited on its own (for
+                # example a child of a launcher stopped just before).
+                $gone = try { $p.HasExited } catch { $false }
+                if (-not $gone) {
+                    $refused[$p.Id] = '{0} ({1}) not stopped: {2}' -f $p.ProcessName, $p.Id, $_.Exception.GetBaseException().Message
+                }
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    $failed += @($refused.Values)
+    if ($left) {
+        $failed += 'still running after 10 s: ' + (($left | ForEach-Object { '{0} ({1})' -f $_.ProcessName, $_.Id }) -join ', ')
+    }
+    if ($stoppedNames -and $Command.Start -and $Command.WaitSeconds -gt 0) {
+        Start-Sleep -Milliseconds ([int]($Command.WaitSeconds * 1000))
+    }
+    $stopped = $killed.Count -gt 0
+
+    $parts = @()
+    $parts += if ($stoppedNames) {
+        'stopped ' + (($stoppedNames | Group-Object | ForEach-Object {
+            if ($_.Count -gt 1) { '{0} x{1}' -f $_.Name, $_.Count } else { $_.Name }
+        }) -join ', ')
+    } else { 'stopped nothing' }
+
+    if ($Command.Start) {
+        try {
+            $startArgs = @{ FilePath = $Command.Start }
+            if ($Command.Arguments) { $startArgs.ArgumentList = $Command.Arguments }
+            # Many apps expect to start in their own directory.
+            if ([System.IO.Path]::IsPathRooted($Command.Start)) {
+                $dir = Split-Path -Parent $Command.Start
+                if ($dir -and (Test-Path -LiteralPath $dir)) { $startArgs.WorkingDirectory = $dir }
+            }
+            Start-Process @startArgs
+            $parts += "started $($Command.Start) $($Command.Arguments)".Trim()
+        } catch {
+            $failed += "start failed: $($_.Exception.Message)"
+        }
+    }
+
+    Write-Log ("Restart $($Command.Name): " + ((@($parts) + @($failed)) -join '; '))
+    if ($failed) {
+        Show-Note "Restart $($Command.Name): something did not work. See the log."
+    } elseif ($Command.Start) {
+        Show-Note "Restarted $($Command.Name)."
+    } elseif ($stopped) {
+        Show-Note "Stopped $($Command.Name)."
+    } else {
+        Show-Note "$($Command.Name) was not running."
+    }
+}
+
+function Edit-RestartCommands {
+    if (-not (Test-Path -LiteralPath $CommandsPath)) {
+        if (-not (Test-Path $Config.LogDir)) {
+            New-Item -ItemType Directory -Path $Config.LogDir -Force | Out-Null
+        }
+        $example = Join-Path $PSScriptRoot 'restart-commands.example.json'
+        if (Test-Path -LiteralPath $example) {
+            Copy-Item -LiteralPath $example -Destination $CommandsPath
+        } else {
+            Set-Content -LiteralPath $CommandsPath -Value '{ "Commands": [] }' -Encoding UTF8
+        }
+        Write-Log "Created $CommandsPath"
+    }
+    Start-Process notepad.exe -ArgumentList "`"$CommandsPath`""
+}
+
+# Reads the file again when it changed since the last read, then rebuilds the
+# submenu and the hotkeys. Called on every poll and when the menu opens, so
+# an edit takes effect without a restart of the app. Problems are reported
+# once per change of the file, not on every call.
+function Sync-RestartCommands {
+    $stamp = if (Test-Path -LiteralPath $CommandsPath) { (Get-Item -LiteralPath $CommandsPath).LastWriteTimeUtc } else { $null }
+    if ($RestartList.Loaded -and $stamp -eq $RestartList.Stamp) { return }
+    $RestartList.Loaded = $true
+    $RestartList.Stamp = $stamp
+
+    $read = Read-RestartCommands
+    $problems = @($read.Problems)
+
+    foreach ($id in @($RestartList.ByHotkey.Keys)) { $Window.UnregisterHotkey($id) }
+    $RestartList.ByHotkey = @{}
+    $old = @($MenuRestart.DropDownItems)
+    $MenuRestart.DropDownItems.Clear()
+    foreach ($item in $old) { if ($item -ne $MenuEditList) { $item.Dispose() } }
+
+    $i = 0
+    foreach ($command in $read.Commands) {
+        $item = New-Object System.Windows.Forms.ToolStripMenuItem $command.Name
+        $item.Tag = $command
+        $item.add_Click({ param($s, $e) try { Invoke-RestartCommand $s.Tag } catch { Write-Log "ERROR: $_" } })
+        if ($command.Hotkey) {
+            $id = $RestartHotkeyBase + $i
+            if ($Window.RegisterHotkey($id, $command.Hotkey.Modifiers, $command.Hotkey.Key)) {
+                $RestartList.ByHotkey[$id] = $command
+                $item.ShortcutKeyDisplayString = $command.Hotkey.Text
+            } else {
+                $problems += "$($command.Hotkey.Text) for '$($command.Name)' is taken by another app or command"
+                $item.ShortcutKeyDisplayString = '(hotkey unavailable)'
+            }
+        }
+        [void]$MenuRestart.DropDownItems.Add($item)
+        $i++
+    }
+    if ($read.Commands) { [void]$MenuRestart.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator)) }
+    [void]$MenuRestart.DropDownItems.Add($MenuEditList)
+
+    if ($null -ne $stamp) { Write-Log "Restart commands: $(@($read.Commands).Count) loaded from $CommandsPath" }
+    foreach ($p in $problems) { Write-Log "WARNING: restart commands: $p" }
+    if ($problems) { Show-Note 'A restart command has a problem. See the log.' }
+}
+
 # ---------------------------------------------------------------- menu
 
 $Menu = New-Object System.Windows.Forms.ContextMenuStrip
@@ -681,6 +961,11 @@ $MenuExplorer = New-Object System.Windows.Forms.ToolStripMenuItem 'Restart Explo
 $MenuExplorer.ShortcutKeyDisplayString = 'Ctrl+Alt+Shift+E'
 $MenuExplorer.add_Click({ try { Restart-Explorer } catch { Write-Log "ERROR: $_" } })
 
+# Filled from restart-commands.json by Sync-RestartCommands.
+$MenuRestart = New-Object System.Windows.Forms.ToolStripMenuItem 'Restart an app'
+$MenuEditList = New-Object System.Windows.Forms.ToolStripMenuItem 'Edit the list...'
+$MenuEditList.add_Click({ try { Edit-RestartCommands } catch { Write-Log "ERROR: $_" } })
+
 $MenuLog = New-Object System.Windows.Forms.ToolStripMenuItem 'Open log'
 $MenuLog.add_Click({ if (Test-Path $LogPath) { Start-Process notepad.exe $LogPath } })
 
@@ -703,12 +988,16 @@ $MenuExit.add_Click({ Stop-App 'menu' })
 [void]$Menu.Items.AddRange(@(
     $MenuAway, $MenuKeep, $MenuAuto,
     (New-Object System.Windows.Forms.ToolStripSeparator),
-    $MenuExplorer, $MenuLog,
+    $MenuExplorer, $MenuRestart, $MenuLog,
     (New-Object System.Windows.Forms.ToolStripSeparator),
     $MenuExit
 ))
 $Tray.ContextMenuStrip = $Menu
-$Menu.add_Opening({ try { Update-Tray } catch { Write-Log "ERROR: $_" } })  # fresh "time left" when the menu opens
+$Menu.add_Opening({
+    # Fresh "time left", and restart commands saved since the last poll.
+    try { Sync-RestartCommands } catch { Write-Log "ERROR: $_" }
+    try { Update-Tray } catch { Write-Log "ERROR: $_" }
+})
 
 # Left click opens the same menu as right click. NotifyIcon only exposes this
 # through a private method.
@@ -722,11 +1011,17 @@ $Tray.add_MouseClick({
 
 $Window = New-Object Hibearnate.MessageWindow
 $mods = [Hibearnate.MessageWindow]::MOD_CONTROL -bor [Hibearnate.MessageWindow]::MOD_ALT -bor [Hibearnate.MessageWindow]::MOD_SHIFT
-if (-not $Window.RegisterHotkey($mods, [System.Windows.Forms.Keys]::E)) {
+if (-not $Window.RegisterHotkey($ExplorerHotkeyId, $mods, [System.Windows.Forms.Keys]::E)) {
     Write-Log 'WARNING: Ctrl+Alt+Shift+E is taken by another app; the hotkey is off. Use the tray menu.'
     $MenuExplorer.ShortcutKeyDisplayString = '(hotkey unavailable)'
 }
-$Window.add_HotkeyPressed({ try { Restart-Explorer } catch { Write-Log "ERROR: $_" } })
+$Window.add_HotkeyPressed({
+    param($s, $e)
+    try {
+        if ($e.Id -eq $ExplorerHotkeyId) { Restart-Explorer }
+        elseif ($RestartList.ByHotkey.ContainsKey($e.Id)) { Invoke-RestartCommand $RestartList.ByHotkey[$e.Id] }
+    } catch { Write-Log "ERROR: $_" }
+})
 $Window.add_LidChanged({
     try {
         Write-Log $(if ($Window.LidOpen) { 'Lid opened' } else { 'Lid closed' })
@@ -776,6 +1071,7 @@ try {
 }
 Set-Effective 'Away' 'launch'
 Update-Tray
+try { Sync-RestartCommands } catch { Write-Log "ERROR loading restart commands: $_" }
 $Timer.Start()
 
 try {

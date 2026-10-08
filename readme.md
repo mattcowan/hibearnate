@@ -2,7 +2,7 @@
 
 Power profiles for Windows. A bear hibernates in winter and goes out to find food in spring. Hibearnate makes a Windows laptop do the same: the laptop hibernates when nobody uses it, and it stays awake while there is work.
 
-Hibearnate is a tray app for a Windows laptop. It switches the power settings between "hibernate when I leave" and "stay awake while Claude Code works". It also restarts Explorer with one hotkey.
+Hibearnate is a tray app for a Windows laptop. It switches the power settings between "hibernate when I leave" and "stay awake while Claude Code works". It also restarts Explorer with one hotkey, and it restarts other apps from a list that you keep.
 
 ## Why it exists
 
@@ -38,6 +38,8 @@ Click the tray icon with the left or the right mouse button to open the menu.
 | Keep Working > Until I switch back | The same as above, with no time limit. |
 | Auto (follow Claude sessions) | Keep Working while a Claude Code session is busy. Away when all sessions are quiet. |
 | Restart Explorer | Restarts Explorer, the Start menu, and search. The hotkey is Ctrl+Alt+Shift+E. |
+| Restart an app > (name) | Stops all the processes of an app in your list, then starts the app again. See [Restart other apps](#restart-other-apps). |
+| Restart an app > Edit the list... | Opens your list in Notepad. |
 | Open log | Opens the log in Notepad. |
 | Exit (sets Away) | Puts the Away settings back and stops the app. |
 
@@ -92,6 +94,59 @@ The restart closes all open File Explorer windows. The tray icon comes back by i
 
 Each restart writes a line to the log. The line gives the Explorer uptime and memory, the time since the last wake from standby, and the time since the display came on. Use these lines to find out if the freezes follow standby or the display timer.
 
+### Restart other apps
+
+Some apps stop working correctly until you restart them. For example, the custom buttons of a Logitech mouse can stop working until LG HUB restarts. LG HUB runs as several processes, so a restart in Task Manager takes many steps. A restart command does all the steps at once.
+
+To add a command:
+
+1. Open the menu and select Restart an app > Edit the list....
+2. Add or change a command in Notepad. The first time, the file contains the LG HUB example.
+3. Save the file.
+
+The app reads the file again in 10 seconds, or when you open the menu. You do not have to restart the app.
+
+The list is in `%LOCALAPPDATA%\Hibearnate\restart-commands.json`:
+
+```json
+{
+    "Commands": [
+        {
+            "Name": "LG HUB",
+            "Stop": [ "lghub_system_tray", "lghub_agent", "lghub" ],
+            "Start": "C:\\Program Files\\LGHUB\\system_tray\\lghub_system_tray.exe",
+            "Arguments": "--minimized",
+            "WaitSeconds": 2,
+            "Hotkey": "Ctrl+Alt+Shift+L"
+        }
+    ]
+}
+```
+
+| Field | Necessary | What it does |
+| --- | --- | --- |
+| `Name` | Yes | The text in the menu. |
+| `Stop` | Yes | The process names to stop, as Task Manager shows them on the Details tab. The `.exe` is optional. The app stops every process with each name. Wildcards are not permitted. |
+| `Start` | No | The program to start after the stop. Write each `\` as `\\`. You can use variables such as `%LOCALAPPDATA%`. Without `Start`, the command only stops the processes. |
+| `Arguments` | No | The arguments for the program. |
+| `WaitSeconds` | No | The time to wait between the stop and the start, from 0 to 30 seconds. The default is 2. Some apps need this time to release their devices. |
+| `Hotkey` | No | A global hotkey, for example `Ctrl+Alt+Shift+L`. Use one key and one or more of `Ctrl`, `Alt`, `Shift`, and `Win`. |
+
+To find the start command of an app that starts at login, look in Task Manager > Startup apps (right-click a column heading and add the Command line column), or in the registry at `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+
+The app stops the names in the order of the list. Put a launcher first, so it cannot start its child processes again during the stop. The app continues to stop processes until no process with a name in the list runs. If a process starts again, the app stops it again. After 10 seconds, the app stops and writes the names of the processes that still run to the log. When all the processes are stopped, the app waits for `WaitSeconds`, and then it starts the program.
+
+Task Manager shows other names on the Processes tab. For LG HUB, "LGHUB Agent" is `lghub_agent`, "G HUB" is `lghub`, and "LGHUB Updater" is `lghub_updater`. Use the names from the Details tab.
+
+Each restart writes a line to the log and shows a notification. If a process does not stop, or the program does not start, the notification tells you to look in the log.
+
+Some limits:
+
+- The app cannot stop a process that runs as administrator, as SYSTEM, or as a service. Admin rights are necessary for this. For example, `lghub_updater` is part of a service, so the LG HUB command does not stop it.
+- The app never stops itself or the console host that runs it.
+- If another app uses the hotkey, the menu shows "(hotkey unavailable)". The menu item still works.
+- If the file has an error, the app shows a notification and writes the error to the log. A command with an error is not in the menu. The other commands stay.
+
 ## How it works
 
 The app changes four settings on the active power plan. It changes the AC value and the DC value together.
@@ -128,13 +183,15 @@ Change the values in the `$Config` block at the top of `Hibearnate.ps1`. Then us
 
 To tune Auto, start the app with `-TraceAuto`. The app then writes the Auto inputs to the log at every check.
 
-To test the settings without the tray, run `.\Hibearnate.ps1 -SelfTest`. It applies both profiles, reads them back, samples the Claude Code sessions, and reads the dashboard. It leaves the laptop in Away. If the tray app runs, the self-test stops with an error. Use Exit in the tray menu first.
+To test the settings without the tray, run `.\Hibearnate.ps1 -SelfTest`. It applies both profiles, reads them back, samples the Claude Code sessions, and reads the dashboard. It also shows the restart commands and the errors in the list. It leaves the laptop in Away. If the tray app runs, the self-test stops with an error. Use Exit in the tray menu first.
 
 ## Remove
 
 1. Run `.\Uninstall.ps1`.
 
 This removes the Startup shortcut and asks the app to stop. The app puts the Away values back before it stops. If the app does not stop in 20 seconds, the script stops it by force and shows a warning. Then the script puts back the settings that the app recorded before its first start, and removes the record. Use `.\Uninstall.ps1 -KeepSettings` to keep the Away values and the record.
+
+`Uninstall.ps1` does not remove your list of restart commands.
 
 To put back only the settings, run `.\Restore-Baseline.ps1`. This script uses `powercfg` directly, so it works if the app does not. If `powercfg` fails, the script names each setting that it did not restore.
 
@@ -145,7 +202,8 @@ The app records the original values to `%LOCALAPPDATA%\Hibearnate\baseline.json`
 | File | Purpose |
 | --- | --- |
 | `Hibearnate.ps1` | The tray app. |
-| `Hibearnate.cs` | Native helpers: power settings, hotkey, lid and display events, Claude Code activity. |
+| `Hibearnate.cs` | Native helpers: power settings, hotkeys, lid and display events, Claude Code activity. |
+| `restart-commands.example.json` | The first content of your list of restart commands. |
 | `Install.ps1` | Adds the Startup shortcut and starts the app. |
 | `Uninstall.ps1` | Removes the shortcut, stops the app, and restores the settings. |
 | `Restore-Baseline.ps1` | Puts back the settings that the app recorded before its first start. |
