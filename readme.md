@@ -36,7 +36,7 @@ Click the tray icon with the left or the right mouse button to open the menu.
 | Away (lid hibernates) | Closing the lid hibernates. Idle standby turns into hibernate after 20 minutes. The network is off in standby. |
 | Keep Working > For 20 minutes, 1 hour, 2 hours, 3 hours | Closing the lid does nothing. The laptop does not go to sleep. The screen still turns off on its normal timer. |
 | Keep Working > Until I switch back | The same as above, with no time limit. |
-| Auto (follow Claude sessions) | Keep Working while a Claude Code session or another tool is busy. Away when all are quiet. See [How Auto decides](#how-auto-decides). |
+| Auto (follow Claude and busy tools) | Keep Working while a Claude Code session or another tool is busy. Away when all are quiet. See [How Auto decides](#how-auto-decides). |
 | Restart Explorer | Restarts Explorer, the Start menu, and search. The hotkey is Ctrl+Alt+Shift+E. |
 | Restart an app > (name) | Stops all the processes of an app in your list, then starts the app again. See [Restart other apps](#restart-other-apps). |
 | Restart an app > Edit the list... | Opens your list in Notepad. |
@@ -101,7 +101,7 @@ To report work, run `Busy.ps1` in this directory:
 | Parameter | What it does |
 | --- | --- |
 | `-Name` | The name of the tool. The tooltip and the log show this name. Use 1 to 24 letters, digits, `.`, `_`, or `-`. The first character must be a letter or a digit. |
-| `-For` | The time limit: a whole number and `s`, `m`, or `h`. For example: `30s`, `10m`, or `2h`. The minimum is 30 seconds. The maximum is 3 hours. |
+| `-For` | The time limit: a whole number and `s`, `m`, or `h`. For example: `30s`, `10m`, or `2h`. The minimum is 30 seconds. The maximum is `AutoMaxMinutes` in `$Config`, 3 hours by default. |
 | `-Done` | Removes the report of the tool. Use it in place of `-For`. |
 
 A tool has one report at a time. A new report with the same name replaces the old report. For a long task, report again before the time limit ends. For example, report `-For 2m` one time each minute.
@@ -110,7 +110,7 @@ A tool has one report at a time. A new report with the same name replaces the ol
 
 The reports have an effect only in Auto. In Away and in Keep Working, the app does not use them. A report counts toward the 3-hour limit of Auto.
 
-If Hibearnate does not run, `Busy.ps1` writes the report and shows a warning. The exit code is 0. If the name or the time limit is not correct, the exit code is 1.
+If Hibearnate does not run, `Busy.ps1` writes the report and shows a warning. The exit code is 0. If Hibearnate runs under a different Windows account, `Busy.ps1` also shows a warning, because that app does not read your report. If the name or the time limit is not correct, or the report file cannot be written or removed, the exit code is 1.
 
 To run `Busy.ps1` from a program, use this command line:
 
@@ -128,7 +128,9 @@ The start of PowerShell takes some time. A program can write the report file its
 
 - `Name` must be the same as the file name without `.json`. The rules for `-Name` apply.
 - `Until` is the end of the time limit. Use ISO 8601 format with `Z` or with an offset, such as `+02:00`. In JavaScript, `new Date(Date.now() + 120000).toISOString()` gives this format.
-- Write the text to a temporary file in the same folder first. The name of the temporary file must not end in `.json`. Then rename the temporary file to the report file. This prevents a read of a file that is only partly written. In Node.js, `fs.renameSync` replaces the old report file.
+- Write the text to a temporary file in the same folder first. Give the temporary file a name that ends in `.tmp`, for example `pytest.json.1234.tmp`. Then rename the temporary file to the report file. This prevents a read of a file that is only partly written. In Node.js, `fs.renameSync` replaces the old report file.
+- The rename or the delete can fail for a short time while the app reads the file. In Node.js, the error code is then `EPERM` or `EBUSY`. Try again after 100 milliseconds. `Busy.ps1` tries 3 times.
+- The app deletes a `.tmp` file that is older than 10 minutes. Thus, a temporary file that a crashed tool leaves stays only for a short time.
 - To remove the report, delete the file.
 
 The app counts a report for a maximum of 3 hours after the last write of its file, also if `Until` is later. The app deletes a report file when its time limit ends. If a file is not correct, the app writes the problem to the log and does not use the file.

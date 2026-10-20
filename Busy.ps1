@@ -9,7 +9,8 @@
     ends. A tool that crashes stops renewing, and its lease ends by itself.
 
     Loads neither Hibearnate.ps1 nor its C# helper, so a call costs only the
-    PowerShell startup. The checks here repeat the tray's own (Read-Leases in
+    PowerShell startup. It only reads AutoMaxMinutes from the text of
+    Hibearnate.ps1. The checks here repeat the tray's own (Read-Leases in
     Hibearnate.ps1). The tray enforces them again, because a tool may also
     write the file directly in the format that readme.md documents.
 
@@ -19,7 +20,7 @@
 
 .PARAMETER For
     How long the lease lasts: a whole number with s, m or h (30s, 10m, 2h),
-    from 30 seconds to 3 hours.
+    from 30 seconds to AutoMaxMinutes in Hibearnate.ps1 (3 hours by default).
 
 .PARAMETER Done
     Remove this tool's lease instead. Auto still waits its quiet period.
@@ -39,9 +40,19 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $LeaseDir = Join-Path $env:LOCALAPPDATA 'Hibearnate\leases'
-$NamePattern = '^[A-Za-z0-9][A-Za-z0-9._-]{0,23}$'  # $LeaseNamePattern in Hibearnate.ps1
+# \z, not $: in .NET, $ also matches before a trailing newline.
+$NamePattern = '^[A-Za-z0-9][A-Za-z0-9._-]{0,23}\z'  # $LeaseNamePattern in Hibearnate.ps1
 $MinSeconds = 30
-$MaxMinutes = 180  # AutoMaxMinutes in Hibearnate.ps1, which caps every lease at that anyway
+# The tray caps every lease at its AutoMaxMinutes, so take the limit from
+# there. A regex over the text, not a dot-source: the script would start the
+# tray. 180 is the shipped value, for a file that cannot be read.
+$MaxMinutes = 180
+try {
+    $trayText = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Hibearnate.ps1'))
+    if ($trayText -match '(?m)^\s*AutoMaxMinutes\s*=\s*(\d{1,5})\b' -and [int]$Matches[1] -ge 1) {
+        $MaxMinutes = [int]$Matches[1]
+    }
+} catch { }
 
 # No Mandatory parameters: a missing one would prompt, and a tool that runs
 # this without a console would hang on the prompt instead of getting exit 1.
@@ -61,18 +72,30 @@ $path = Join-Path $LeaseDir "$Name.json"
 
 if ($Done) {
     if ($For) { Stop-WithError 'Use -For or -Done, not both.' }
-    # File.Delete ignores a missing file but throws on a missing folder.
-    if (Test-Path -LiteralPath $LeaseDir) { [System.IO.File]::Delete($path) }
+    # File.Delete ignores a missing file but throws on a missing folder. Retry,
+    # because the delete fails while the tray reads the file.
+    if (Test-Path -LiteralPath $LeaseDir) {
+        for ($try = 1; $try -le 3; $try++) {
+            try {
+                [System.IO.File]::Delete($path)
+                break
+            } catch {
+                if ($try -eq 3) { Stop-WithError "Could not remove ${path}: $($_.Exception.GetBaseException().Message)" }
+                Start-Sleep -Milliseconds 100
+            }
+        }
+    }
     "Done: $Name"
     exit 0
 }
 
-if ($For -notmatch '^(\d{1,6})([smh])$') {
+if ($For -notmatch '^(\d{1,6})([smh])\z') {
     Stop-WithError "-For must be a whole number with s, m or h, for example 30s, 10m or 2h (got '$For')."
 }
 $seconds = [int]$Matches[1] * @{ s = 1; m = 60; h = 3600 }[$Matches[2].ToLowerInvariant()]
 if ($seconds -lt $MinSeconds -or $seconds -gt $MaxMinutes * 60) {
-    Stop-WithError "-For must be from $MinSeconds seconds to $($MaxMinutes / 60) hours (got '$For')."
+    $maxText = if ($MaxMinutes % 60 -eq 0) { "$($MaxMinutes / 60) hours" } else { "$MaxMinutes minutes" }
+    Stop-WithError "-For must be from $MinSeconds seconds to $maxText (got '$For')."
 }
 
 $until = (Get-Date).ToUniversalTime().AddSeconds($seconds)
@@ -98,8 +121,9 @@ for ($try = 1; -not $moved -and $try -le 3; $try++) {
         $moved = $true
     } catch {
         if ($try -eq 3) {
-            [System.IO.File]::Delete($temp)
-            Stop-WithError "Could not write ${path}: $($_.Exception.Message)"
+            # The tray removes a temp file that is left over, so a failure here is not fatal.
+            try { [System.IO.File]::Delete($temp) } catch { }
+            Stop-WithError "Could not write ${path}: $($_.Exception.GetBaseException().Message)"
         }
         Start-Sleep -Milliseconds 100
     }
@@ -109,9 +133,15 @@ for ($try = 1; -not $moved -and $try -le 3; $try++) {
 
 # The tray holds this mutex while it runs. Opening it does not take it, so
 # this check never blocks a tray start (the tray uses WaitOne, not createdNew).
+# TryOpenExisting throws, not returns false, when the mutex exists but belongs
+# to another account (this script ran under runas, for example).
 $mutex = $null
-if ([System.Threading.Mutex]::TryOpenExisting('Local\Hibearnate', [ref]$mutex)) {
-    $mutex.Dispose()
-} else {
-    Write-Warning 'Hibearnate is not running, so nothing reads this lease until it starts.'
+try {
+    if ([System.Threading.Mutex]::TryOpenExisting('Local\Hibearnate', [ref]$mutex)) {
+        $mutex.Dispose()
+    } else {
+        Write-Warning 'Hibearnate is not running, so nothing reads this lease until it starts.'
+    }
+} catch [System.UnauthorizedAccessException] {
+    Write-Warning "Hibearnate runs under another account, so it does not read this lease (written for $env:USERNAME)."
 }

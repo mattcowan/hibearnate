@@ -72,7 +72,7 @@ $CommandsPath = Join-Path $Config.LogDir 'restart-commands.json'
 # Busy.ps1, or a tool that writes the file itself, puts one lease per tool
 # here as <Name>.json. Busy.ps1 carries its own copy of the name rule.
 $LeaseDir = Join-Path $Config.LogDir 'leases'
-$LeaseNamePattern = '^[A-Za-z0-9][A-Za-z0-9._-]{0,23}$'
+$LeaseNamePattern = '^[A-Za-z0-9][A-Za-z0-9._-]{0,23}\z'  # \z: $ also matches before a final newline
 
 $SUB_BUTTONS = [guid]'4f971e89-eebd-4455-a8de-9e59040e7347'
 $SUB_SLEEP   = [guid]'238c9fa8-0aad-41ed-83f4-97be242c8f20'
@@ -379,14 +379,20 @@ function Get-DashboardWorking {
 # directly, and one that wrote a far Until and then crashed must not keep the
 # machine awake. Ended leases are deleted. A file that vanishes or is locked
 # during the read (a tool renewing or releasing it) is skipped without a
-# problem; the next poll reads it again.
+# problem; the next poll reads it again. Temp files that a killed writer
+# (or an interrupted removal here) left behind are deleted after 10 minutes.
 function Read-Leases {
     $result = @{ Active = @(); Problems = @() }
     if (-not (Test-Path -LiteralPath $LeaseDir)) { return $result }
     $now = (Get-Date).ToUniversalTime()
+    $all = @(Get-ChildItem -LiteralPath $LeaseDir -File -ErrorAction SilentlyContinue)
+    foreach ($stale in @($all | Where-Object {
+            ($_.Extension -eq '.tmp' -or $_.Extension -eq '.ended') -and
+            $_.LastWriteTimeUtc -lt $now.AddMinutes(-10) })) {
+        try { [System.IO.File]::Delete($stale.FullName) } catch { }
+    }
     # The extension test also skips the .tmp files of a write in progress.
-    $files = @(Get-ChildItem -LiteralPath $LeaseDir -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Extension -eq '.json' })
+    $files = @($all | Where-Object { $_.Extension -eq '.json' })
     foreach ($file in $files) {
         try {
             $text = [System.IO.File]::ReadAllText($file.FullName)  # UTF-8, with or without a BOM
@@ -418,10 +424,18 @@ function Read-Leases {
         $limit = $file.LastWriteTimeUtc.AddMinutes($Config.AutoMaxMinutes)
         if ($until -gt $limit) { $until = $limit }
         if ($until -le $now) {
-            # Only if the file is still the one read: a tool may have renewed it since.
+            # A tool may renew the lease at any moment, so check and delete
+            # the same file: move it out of the way (atomic; a renewal after
+            # this lands as a new .json), then compare the moved file's write
+            # time with the one read. A renewal that landed before the move is
+            # put back, unless a newer renewal already took its place.
+            $ended = "$($file.FullName).$([guid]::NewGuid().ToString('N')).ended"
             try {
-                if ((Get-Item -LiteralPath $file.FullName).LastWriteTimeUtc -eq $file.LastWriteTimeUtc) {
-                    Remove-Item -LiteralPath $file.FullName
+                [System.IO.File]::Move($file.FullName, $ended)
+                if ([System.IO.File]::GetLastWriteTimeUtc($ended) -eq $file.LastWriteTimeUtc) {
+                    [System.IO.File]::Delete($ended)
+                } else {
+                    try { [System.IO.File]::Move($ended, $file.FullName) } catch { [System.IO.File]::Delete($ended) }
                 }
             } catch { }
             continue
@@ -1182,7 +1196,7 @@ foreach ($minutes in $Config.KeepWorkingChoices) {
     [void]$MenuKeep.DropDownItems.Add($item)
 }
 
-$MenuAuto = New-Object System.Windows.Forms.ToolStripMenuItem 'Auto (follow Claude sessions)'
+$MenuAuto = New-Object System.Windows.Forms.ToolStripMenuItem 'Auto (follow Claude and busy tools)'
 $MenuAuto.add_Click({ try { Enter-Auto } catch { Write-Log "ERROR: $_" } })
 
 $MenuExplorer = New-Object System.Windows.Forms.ToolStripMenuItem 'Restart Explorer'
