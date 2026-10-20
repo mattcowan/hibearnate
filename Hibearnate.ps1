@@ -13,20 +13,22 @@
     battery falls to the floor), the machine returns to Away and hibernates
     once nobody is using it. Every clean way out of the app puts Away back.
 
-    Auto: Keep Working while a Claude Code session looks busy, Away otherwise.
-    "Busy" is a Working card on the status dashboard OR a Claude session's
-    process tree (claude.exe, or node.exe running Claude Code's cli.js) that
-    started a new process or used CPU since the last poll. Either
-    signal alone is enough, because neither is reliable alone: cards can go
-    stale, and a Claude session uses about as little CPU while the model
-    generates as it does idle (only tool runs show up).
+    Auto: Keep Working while a Claude Code session or another tool looks busy,
+    Away otherwise. "Busy" is a lease that a tool wrote with Busy.ps1 and that
+    has not ended, OR a Working card on the status dashboard, OR a Claude
+    session's process tree (claude.exe, or node.exe running Claude Code's
+    cli.js) that started a new process or used CPU since the last poll. Any
+    signal alone is enough, because none covers every case: cards can go
+    stale, a lease needs a tool that reports, and a Claude session uses about
+    as little CPU while the model generates as it does idle (only tool runs
+    show up).
 
     See readme.md for install steps and the reason behind each setting.
 
 .PARAMETER SelfTest
     Run the checks that need no tray (settings round trip, Claude activity
-    sample, dashboard read, restart-command list with its problems), print
-    the results and exit. Leaves the machine in the Away profile.
+    sample, dashboard read, busy leases, restart-command list with its
+    problems), print the results and exit. Leaves the machine in the Away profile.
 
 .PARAMETER TraceAuto
     Log the Auto inputs on every poll, to tune the CPU threshold.
@@ -67,6 +69,10 @@ $BaselinePath = Join-Path $Config.LogDir 'baseline.json'
 # Per user and outside the repo, so a pull never overwrites it. "Edit the
 # list" creates it from restart-commands.example.json.
 $CommandsPath = Join-Path $Config.LogDir 'restart-commands.json'
+# Busy.ps1, or a tool that writes the file itself, puts one lease per tool
+# here as <Name>.json. Busy.ps1 carries its own copy of the name rule.
+$LeaseDir = Join-Path $Config.LogDir 'leases'
+$LeaseNamePattern = '^[A-Za-z0-9][A-Za-z0-9._-]{0,23}$'
 
 $SUB_BUTTONS = [guid]'4f971e89-eebd-4455-a8de-9e59040e7347'
 $SUB_SLEEP   = [guid]'238c9fa8-0aad-41ed-83f4-97be242c8f20'
@@ -366,6 +372,66 @@ function Get-DashboardWorking {
     }
 }
 
+# Reads the busy leases in $LeaseDir. Returns @{ Active; Problems }, where
+# Active holds @{ Name; Until (UTC) } for each lease that has not ended,
+# sorted by name. A lease counts for at most AutoMaxMinutes after its file
+# was last written, whatever its Until says: tools may write the file
+# directly, and one that wrote a far Until and then crashed must not keep the
+# machine awake. Ended leases are deleted. A file that vanishes or is locked
+# during the read (a tool renewing or releasing it) is skipped without a
+# problem; the next poll reads it again.
+function Read-Leases {
+    $result = @{ Active = @(); Problems = @() }
+    if (-not (Test-Path -LiteralPath $LeaseDir)) { return $result }
+    $now = (Get-Date).ToUniversalTime()
+    # The extension test also skips the .tmp files of a write in progress.
+    $files = @(Get-ChildItem -LiteralPath $LeaseDir -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Extension -eq '.json' })
+    foreach ($file in $files) {
+        try {
+            $text = [System.IO.File]::ReadAllText($file.FullName)  # UTF-8, with or without a BOM
+        } catch {
+            continue
+        }
+        try {
+            $data = $text | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            $result.Problems += "$($file.Name): not valid JSON"
+            continue
+        }
+        $name = [string]$data.Name
+        if ($name -notmatch $LeaseNamePattern -or $name -ne $file.BaseName) {
+            $result.Problems += "$($file.Name): Name must match the file name and be 1 to 24 letters, digits, '.', '_' or '-'"
+            continue
+        }
+        # Windows PowerShell 5.1 leaves ISO 8601 dates as strings. Require an
+        # offset or Z: without one, the time would silently mean local time.
+        $untilText = [string]$data.Until
+        $parsed = [DateTimeOffset]::MinValue
+        if ($untilText -notmatch '(Z|[+-]\d\d:\d\d)$' -or
+            -not [DateTimeOffset]::TryParse($untilText, [System.Globalization.CultureInfo]::InvariantCulture,
+                [System.Globalization.DateTimeStyles]::None, [ref]$parsed)) {
+            $result.Problems += "$($file.Name): Until is not an ISO 8601 time with Z or an offset"
+            continue
+        }
+        $until = $parsed.UtcDateTime
+        $limit = $file.LastWriteTimeUtc.AddMinutes($Config.AutoMaxMinutes)
+        if ($until -gt $limit) { $until = $limit }
+        if ($until -le $now) {
+            # Only if the file is still the one read: a tool may have renewed it since.
+            try {
+                if ((Get-Item -LiteralPath $file.FullName).LastWriteTimeUtc -eq $file.LastWriteTimeUtc) {
+                    Remove-Item -LiteralPath $file.FullName
+                }
+            } catch { }
+            continue
+        }
+        $result.Active += [pscustomobject]@{ Name = $name; Until = $until }
+    }
+    $result.Active = @($result.Active | Sort-Object Name)
+    return $result
+}
+
 # ---------------------------------------------------------------- single instance
 
 # Taken before the self-test too: the self-test rewrites the power settings,
@@ -413,6 +479,10 @@ if ($SelfTest) {
         'Claude sessions: {0}, busy: {1}, new processes: {2}, max CPU ms in {3}s: {4:N0}' -f $sample.Sessions, $sample.BusySessions, $sample.Spawns, $Config.PollSeconds, $sample.MaxCpuMs
         "  per session (pid:cpu+spawns): $($sample.Detail)"
         "Dashboard Working cards (fresh): $(Get-DashboardWorking)"
+        $leases = Read-Leases
+        "Busy leases: $(@($leases.Active).Count) in $LeaseDir"
+        foreach ($l in $leases.Active) { '  {0}: until {1:yyyy-MM-dd HH:mm:ss}' -f $l.Name, $l.Until.ToLocalTime() }
+        foreach ($p in $leases.Problems) { "  PROBLEM: $p" }
         "Idle for: $(Format-Span ([Hibearnate.UserIdle]::Get()))"
         $restart = Read-RestartCommands
         "Restart commands: $(@($restart.Commands).Count) in $CommandsPath"
@@ -448,6 +518,8 @@ $State = @{
     AutoLastBusy    = $null       # last poll with a busy signal
     AutoCapped      = $false      # cap reached; stays Away until signals go quiet
     AutoReason      = ''
+    LeaseNames      = ''          # active lease names at the last Auto poll, to log changes
+    LeaseProblems   = ''          # lease file problems at the last Auto poll, to log changes
     PendingHibernate = $false
 }
 
@@ -521,7 +593,7 @@ function Update-Tray {
             if ($State.Effective -eq 'KeepWorking') { "Hibearnate: Auto, awake ($($State.AutoReason))" }
             elseif ($State.AutoCapped) { 'Hibearnate: Auto, Away (time cap reached)' }
             elseif ($null -ne (Get-LowBattery)) { 'Hibearnate: Auto, Away (battery low)' }
-            else { 'Hibearnate: Auto, Away (Claude idle)' }
+            else { 'Hibearnate: Auto, Away (all quiet)' }
         }
     }
     if ($State.NoBaseline) { $text = 'Hibearnate: originals not recorded, no changes made' }
@@ -602,6 +674,9 @@ function Enter-Auto {
     }
     # The CPU baseline is stale while Auto is off; reset it so the first delta is not inflated.
     $null = $Activity.Sample($Config.ClaudeBusyCpuMs)
+    # Leases are read only in Auto, so log the current set again on entry.
+    $State.LeaseNames = ''
+    $State.LeaseProblems = ''
     Write-Log 'Mode Auto'
     Update-AutoMode
     Update-Tray
@@ -665,9 +740,26 @@ function Test-PendingHibernate {
 function Update-AutoMode {
     $sample = $Activity.Sample($Config.ClaudeBusyCpuMs)
     $cards = Get-DashboardWorking
+    $leases = Read-Leases
+    $names = @($leases.Active | ForEach-Object { $_.Name })
     $now = Get-Date
-    $busy = ($cards -gt 0) -or ($sample.BusySessions -gt 0)
+
+    # The tooltip shows only the first lease; the log names them all.
+    $nameText = $names -join ', '
+    if ($nameText -ne $State.LeaseNames) {
+        Write-Log $(if ($names.Count -gt 0) { "Busy leases: $nameText" } else { 'Busy leases: none' })
+        $State.LeaseNames = $nameText
+    }
+    $problemText = $leases.Problems -join '; '
+    if ($problemText -ne $State.LeaseProblems) {
+        if ($problemText) { Write-Log "WARNING: lease files ignored: $problemText" }
+        $State.LeaseProblems = $problemText
+    }
+
+    $busy = ($names.Count -gt 0) -or ($cards -gt 0) -or ($sample.BusySessions -gt 0)
     $reasons = @()
+    # The lease name first, so the tooltip still names the tool when it is truncated.
+    if ($names.Count -gt 0) { $reasons += $names[0] + $(if ($names.Count -gt 1) { " +$($names.Count - 1)" }) }
     if ($cards -gt 0) { $reasons += "$cards card" + $(if ($cards -gt 1) { 's' }) }
     if ($sample.BusySessions -gt 0) { $reasons += "$($sample.BusySessions) busy" }
     if ($busy) {
@@ -676,7 +768,7 @@ function Update-AutoMode {
     }
 
     if ($TraceAuto) {
-        Write-Log ('Auto poll: cards={0} sessions={1} busy={2} spawns={3} maxCpuMs={4:N0} [{5}]' -f $cards, $sample.Sessions, $sample.BusySessions, $sample.Spawns, $sample.MaxCpuMs, $sample.Detail)
+        Write-Log ('Auto poll: leases={0} cards={1} sessions={2} busy={3} spawns={4} maxCpuMs={5:N0} [{6}]' -f $names.Count, $cards, $sample.Sessions, $sample.BusySessions, $sample.Spawns, $sample.MaxCpuMs, $sample.Detail)
     }
 
     $quiet = -not $State.AutoLastBusy -or ($now - $State.AutoLastBusy).TotalMinutes -ge $Config.AutoQuietMinutes
@@ -700,8 +792,8 @@ function Update-AutoMode {
             Set-Effective 'Away' 'Auto: time cap reached'
             Complete-Work "Auto stayed awake for $(Format-Minutes $Config.AutoMaxMinutes)"
         } elseif ($quiet) {
-            Set-Effective 'Away' 'Auto: Claude idle'
-            Complete-Work 'Claude sessions went quiet'
+            Set-Effective 'Away' 'Auto: all quiet'
+            Complete-Work 'Claude sessions and busy tools went quiet'
         }
     }
 }

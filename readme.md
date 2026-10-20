@@ -36,7 +36,7 @@ Click the tray icon with the left or the right mouse button to open the menu.
 | Away (lid hibernates) | Closing the lid hibernates. Idle standby turns into hibernate after 20 minutes. The network is off in standby. |
 | Keep Working > For 20 minutes, 1 hour, 2 hours, 3 hours | Closing the lid does nothing. The laptop does not go to sleep. The screen still turns off on its normal timer. |
 | Keep Working > Until I switch back | The same as above, with no time limit. |
-| Auto (follow Claude sessions) | Keep Working while a Claude Code session is busy. Away when all sessions are quiet. |
+| Auto (follow Claude sessions) | Keep Working while a Claude Code session or another tool is busy. Away when all are quiet. See [How Auto decides](#how-auto-decides). |
 | Restart Explorer | Restarts Explorer, the Start menu, and search. The hotkey is Ctrl+Alt+Shift+E. |
 | Restart an app > (name) | Stops all the processes of an app in your list, then starts the app again. See [Restart other apps](#restart-other-apps). |
 | Restart an app > Edit the list... | Opens your list in Notepad. |
@@ -68,9 +68,10 @@ On battery, the charge can fall to 15% or less in Keep Working. Then the app goe
 
 ### How Auto decides
 
-Auto checks every 10 seconds. A session is busy if one of these is true:
+Auto checks every 10 seconds. Auto keeps the laptop awake if one of these is true:
 
-- Optional: a [claude-status-dashboard](https://github.com/mattcowan/claude-status-dashboard) board at `http://127.0.0.1:4787` has a card in the Working column with activity in the last 6 hours. If no dashboard runs, Auto uses the other two signals. To turn this signal off, set `DashboardUrl` to `$null` in `$Config`.
+- A tool reported that it is busy, and the time limit of the report did not end. See [Tell Auto that a tool is busy](#tell-auto-that-a-tool-is-busy).
+- Optional: a [claude-status-dashboard](https://github.com/mattcowan/claude-status-dashboard) board at `http://127.0.0.1:4787` has a card in the Working column with activity in the last 6 hours. If no dashboard runs, Auto uses the other signals. To turn this signal off, set `DashboardUrl` to `$null` in `$Config`.
 - The process tree of a Claude session started a new process since the last check. A session that runs tools starts `bash`, `git`, and similar processes all the time. A quiet session starts none.
 - The process tree of a Claude session used 2 seconds of CPU in the last 10 seconds. This catches a long build or test run.
 
@@ -80,11 +81,59 @@ One signal is enough. Auto goes back to Away after 10 minutes with no signal. Au
 
 Each signal has a gap:
 
+- A busy report counts until its time limit ends, also if the tool stopped before without `-Done`.
 - A dashboard card can stay in Working after its session stops.
 - A Claude session uses almost no CPU while the model writes a reply. The process checks see only tool runs.
 - A tool command that starts and stops between two checks is not seen.
 
 The 10-minute quiet period and the dashboard card cover most of these gaps.
+
+### Tell Auto that a tool is busy
+
+A long test run or a different agent tool can keep the laptop awake in Auto. The tool reports that it is busy, with a time limit. When the time limit ends, the report stops counting. Thus, a tool that stops or crashes cannot keep the laptop awake.
+
+To report work, run `Busy.ps1` in this directory:
+
+```powershell
+.\Busy.ps1 -Name pytest -For 10m
+```
+
+| Parameter | What it does |
+| --- | --- |
+| `-Name` | The name of the tool. The tooltip and the log show this name. Use 1 to 24 letters, digits, `.`, `_`, or `-`. The first character must be a letter or a digit. |
+| `-For` | The time limit: a whole number and `s`, `m`, or `h`. For example: `30s`, `10m`, or `2h`. The minimum is 30 seconds. The maximum is 3 hours. |
+| `-Done` | Removes the report of the tool. Use it in place of `-For`. |
+
+A tool has one report at a time. A new report with the same name replaces the old report. For a long task, report again before the time limit ends. For example, report `-For 2m` one time each minute.
+
+`-Done` removes only the report of that tool. Then Auto waits for the 10-minute quiet period, as it does for the other signals. A tool cannot tell Auto to go to Away. To go to Away at once, use the tray menu.
+
+The reports have an effect only in Auto. In Away and in Keep Working, the app does not use them. A report counts toward the 3-hour limit of Auto.
+
+If Hibearnate does not run, `Busy.ps1` writes the report and shows a warning. The exit code is 0. If the name or the time limit is not correct, the exit code is 1.
+
+To run `Busy.ps1` from a program, use this command line:
+
+```text
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\path\to\Busy.ps1 -Name pytest -For 2m
+```
+
+#### Write a report without PowerShell
+
+The start of PowerShell takes some time. A program can write the report file itself. This is faster. The file is `%LOCALAPPDATA%\Hibearnate\leases\<Name>.json`, for example `pytest.json`:
+
+```json
+{ "Name": "pytest", "Until": "2026-10-20T14:30:00Z" }
+```
+
+- `Name` must be the same as the file name without `.json`. The rules for `-Name` apply.
+- `Until` is the end of the time limit. Use ISO 8601 format with `Z` or with an offset, such as `+02:00`. In JavaScript, `new Date(Date.now() + 120000).toISOString()` gives this format.
+- Write the text to a temporary file in the same folder first. The name of the temporary file must not end in `.json`. Then rename the temporary file to the report file. This prevents a read of a file that is only partly written. In Node.js, `fs.renameSync` replaces the old report file.
+- To remove the report, delete the file.
+
+The app counts a report for a maximum of 3 hours after the last write of its file, also if `Until` is later. The app deletes a report file when its time limit ends. If a file is not correct, the app writes the problem to the log and does not use the file.
+
+The folder is in your user profile. Other users and other computers cannot write to it. Administrators can.
 
 ### The Explorer hotkey
 
@@ -195,7 +244,7 @@ Change the values in the `$Config` block at the top of `Hibearnate.ps1`. Then us
 
 To tune Auto, start the app with `-TraceAuto`. The app then writes the Auto inputs to the log at every check.
 
-To test the settings without the tray, run `.\Hibearnate.ps1 -SelfTest`. It applies both profiles, reads them back, samples the Claude Code sessions, and reads the dashboard. It also shows the restart commands and the errors in the list. It leaves the laptop in Away. If the tray app runs, the self-test stops with an error. Use Exit in the tray menu first.
+To test the settings without the tray, run `.\Hibearnate.ps1 -SelfTest`. It applies both profiles, reads them back, samples the Claude Code sessions, reads the dashboard, and shows the busy reports with their problems. It also shows the restart commands and the errors in the list. It leaves the laptop in Away. If the tray app runs, the self-test stops with an error. Use Exit in the tray menu first.
 
 ## Remove
 
@@ -215,6 +264,7 @@ The app records the original values to `%LOCALAPPDATA%\Hibearnate\baseline.json`
 | --- | --- |
 | `Hibearnate.ps1` | The tray app. |
 | `Hibearnate.cs` | Native helpers: power settings, hotkeys, lid and display events, Claude Code activity. |
+| `Busy.ps1` | Tells Auto that a tool is busy, for a time limit. |
 | `restart-commands.example.json` | The first content of your list of restart commands. |
 | `Install.ps1` | Adds the Startup shortcut and starts the app. |
 | `Uninstall.ps1` | Removes the shortcut, stops the app, and restores the settings. |
