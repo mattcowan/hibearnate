@@ -421,6 +421,14 @@ function Read-Leases {
             continue
         }
         $until = $parsed.UtcDateTime
+        # A write time in the future (a copied or restored file, a clock
+        # stepped back) would carry the cap with it. Clamping the limit to
+        # now + AutoMaxMinutes would not help, since now moves on each poll,
+        # so ignore the file instead. One minute allows for small clock fixes.
+        if ($file.LastWriteTimeUtc -gt $now.AddMinutes(1)) {
+            $result.Problems += "$($file.Name): the file's write time is in the future"
+            continue
+        }
         $limit = $file.LastWriteTimeUtc.AddMinutes($Config.AutoMaxMinutes)
         if ($until -gt $limit) { $until = $limit }
         if ($until -le $now) {

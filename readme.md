@@ -110,7 +110,7 @@ A tool has one report at a time. A new report with the same name replaces the ol
 
 The reports have an effect only in Auto. In Away and in Keep Working, the app does not use them. A report counts toward the 3-hour limit of Auto.
 
-If Hibearnate does not run, `Busy.ps1` writes the report and shows a warning. The exit code is 0. If Hibearnate runs under a different Windows account, `Busy.ps1` also shows a warning, because that app does not read your report. If the name or the time limit is not correct, or the report file cannot be written or removed, the exit code is 1.
+If Hibearnate does not run, `Busy.ps1` writes the report and shows a warning. The exit code is 0. If Hibearnate runs under a different Windows account, `Busy.ps1` also shows a warning, because that app does not read your report. If the name or the time limit is not correct, or the report file cannot be written or removed, the exit code is 1. After a failed write, the old report of the tool can also be gone. Report again.
 
 To run `Busy.ps1` from a program, use this command line:
 
@@ -133,7 +133,7 @@ The start of PowerShell takes some time. A program can write the report file its
 - The app deletes a `.tmp` file that is older than 10 minutes. Thus, a temporary file that a crashed tool leaves stays only for a short time.
 - To remove the report, delete the file.
 
-The app counts a report for a maximum of 3 hours after the last write of its file, also if `Until` is later. The app deletes a report file when its time limit ends. If a file is not correct, the app writes the problem to the log and does not use the file.
+The app counts a report for a maximum of 3 hours after the last write of its file, also if `Until` is later. If the last write time of the file is in the future, the app does not use the file. The app deletes a report file when its time limit ends. If a file is not correct, the app writes the problem to the log and does not use the file.
 
 The folder is in your user profile. Other users and other computers cannot write to it. Administrators can.
 
