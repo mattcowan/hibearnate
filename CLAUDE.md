@@ -1,6 +1,6 @@
 # Hibearnate — notes for Claude
 
-A Windows tray app (`Hibearnate.ps1` plus the C# helper `Hibearnate.cs`) that switches power settings between Away, Keep Working and Auto, restarts Explorer on Ctrl+Alt+Shift+E, and restarts other apps from a per-user list (`%LOCALAPPDATA%\Hibearnate\restart-commands.json`, seeded from `restart-commands.example.json`). `readme.md` describes the behavior; this file lists the constraints a change or a review must respect.
+A Windows tray app (`Hibearnate.ps1` plus the C# helper `Hibearnate.cs`) that switches power settings between Away, Keep Working and Auto, lets any local tool keep Auto awake for a limited time through lease files in `%LOCALAPPDATA%\Hibearnate\leases\` (written by `Busy.ps1` or by the tool itself), restarts Explorer on Ctrl+Alt+Shift+E, and restarts other apps from a per-user list (`%LOCALAPPDATA%\Hibearnate\restart-commands.json`, seeded from `restart-commands.example.json`). `readme.md` describes the behavior; this file lists the constraints a change or a review must respect.
 
 ## Runtime constraints
 
@@ -18,12 +18,16 @@ A Windows tray app (`Hibearnate.ps1` plus the C# helper `Hibearnate.cs`) that sw
 - **A restart command never stops this process or its console host.** `Read-RestartCommands` refuses `conhost` and `OpenConsole` by name, and `Get-ProtectedPids` protects `$PID` and its parent. Killing the headless `conhost.exe` would end the tray without running any exit path, and leave Keep Working values in the plan.
 - **A restart never blocks the UI thread.** It runs as ticks of `$RestartTimer` (250 ms stop passes, then one `WaitSeconds` tick), so the exit event, `WM_ENDSESSION` and the poll keep running. Do not put `Start-Sleep` or a long wait back into it.
 - **Restart-command process names are exact.** Wildcards are rejected on purpose: `lghub*` would also match a SYSTEM service process.
+- **A busy lease cannot outlive `AutoMaxMinutes`.** Tools may write lease files directly (the format in `readme.md` is a public API), so `Read-Leases` caps each lease at `AutoMaxMinutes` after its file's last write, whatever `Until` says, and ignores a file whose write time is more than a minute in the future (clamping to `now + AutoMaxMinutes` instead would move with every poll and never end). `Busy.ps1` repeats the name and duration checks for clear errors, but the tray is the enforcement point. A lease is one more busy signal: it does not skip the quiet period, it counts toward the Auto cap, and nothing lets a tool force Away.
+- **`Busy.ps1` stays fast and never takes the tray's mutex.** It runs on every renewal, so it loads neither `Hibearnate.ps1` nor the C# helper; it reads `AutoMaxMinutes` from the text of `Hibearnate.ps1` with a regex (dot-sourcing would start the tray). It only opens the mutex with `TryOpenExisting` to warn when the tray is not running, and catches the `UnauthorizedAccessException` it throws when the mutex belongs to another account.
+- **Lease files are replaced and removed under readers.** The tray's `ReadAllText` holds a file without `FILE_SHARE_DELETE`, so a writer's delete or rename-over fails for that moment: `Busy.ps1` retries both 3 times, and the readme tells direct writers to retry. `Read-Leases` removes an ended lease by moving it to a `.ended` name first and then checking the moved file's write time, so a renewal that lands mid-removal is never deleted. It deletes `.tmp` and `.ended` files older than 10 minutes.
 - **The tray tooltip must stay at 63 characters or fewer.** `NotifyIcon.Text` throws above that; `Update-Tray` truncates.
 
 ## PowerShell traps already hit here
 
 - Variable names are case-insensitive: `$fur` and a `[Color]$Fur` parameter are the same variable.
 - `$ErrorActionPreference = 'Stop'` turns `Write-Error` into a terminating error, so code after it does not run.
+- `ConvertFrom-Json` in 5.1 leaves ISO 8601 dates as strings (PowerShell 7 turns them into `DateTime`). `Read-Leases` parses `Until` itself and requires `Z` or an offset.
 - `SystemInformation.PowerStatus.BatteryLifePercent` is a `float`; `0.15f` widens to `0.15000000596`. Compare whole percents.
 
 ## Review notes
