@@ -1345,6 +1345,12 @@ function Sync-DashboardMenu {
 # dashboard answers, to what it saved. If the save fails, or the dashboard
 # did not keep the change (the column was deleted after the menu opened),
 # the tick stays as it was, and the log and a note say so.
+#
+# The list comes from the ticks drawn when the menu opened. A change made in
+# the dashboard's own Settings dialog while the menu was open is therefore
+# replaced by this click. That is accepted: the ticks are then set from the
+# list the dashboard saved, so the result shows at once, and a re-read before
+# each save would add a second wait on the UI thread for a rare case.
 function Switch-DashboardColumn($Item) {
     $want = -not $Item.Checked
     $items = @($MenuDashboard.DropDownItems | Where-Object { $_.Tag -is [string] })

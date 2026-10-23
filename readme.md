@@ -96,7 +96,8 @@ To choose the columns, open the tray menu and point to **Dashboard columns**. Th
 
 - The submenu reads the columns each time that you open the menu. A new or renamed column shows at once.
 - If you clear all columns, the dashboard never keeps Auto awake.
-- If the dashboard does not run, the submenu shows **Dashboard not running**. If the dashboard is too old to have the setting, the submenu shows **Update the dashboard to choose columns**.
+- The submenu sends the ticks that it showed when you opened the menu. If you change the setting in the dashboard while the menu is open, a click in the menu replaces that change. Open the menu again to see the current ticks.
+- If the dashboard does not run, or `DashboardBase` has a wrong address, the submenu shows **Dashboard not running**. The log gives the address that it tried. If the dashboard is too old to have the setting, the submenu shows **Update the dashboard to choose columns**.
 - If a program answers at the dashboard address but the read fails, the submenu shows **Dashboard not reachable. See the log.** The log gives the error.
 - If the dashboard cannot save the choice, the tick does not change. A notification and the log tell you.
 
