@@ -323,7 +323,7 @@ namespace Hibearnate
     //    build or test run that started before the last call.
     // claude.exe itself uses about as little CPU while the model generates as it
     // does idle, so neither signal sees pure model time. Pair this with another
-    // signal (the dashboard) for that.
+    // signal (a busy lease, such as the one the dashboard writes) for that.
     public class ClaudeActivity
     {
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]

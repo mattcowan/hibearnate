@@ -14,21 +14,25 @@
     once nobody is using it. Every clean way out of the app puts Away back.
 
     Auto: Keep Working while a Claude Code session or another tool looks busy,
-    Away otherwise. "Busy" is a lease that a tool wrote with Busy.ps1 and that
-    has not ended, OR a Working card on the status dashboard, OR a Claude
-    session's process tree (claude.exe, or node.exe running Claude Code's
-    cli.js) that started a new process or used CPU since the last poll. Any
-    signal alone is enough, because none covers every case: cards can go
-    stale, a lease needs a tool that reports, and a Claude session uses about
-    as little CPU while the model generates as it does idle (only tool runs
-    show up).
+    Away otherwise. "Busy" is a lease that a tool wrote with Busy.ps1 (or
+    by itself, as the status dashboard does) and that has not ended, OR a
+    Claude session's process tree (claude.exe, or node.exe running Claude
+    Code's cli.js) that started a new process or used CPU since the last poll.
+    Any signal alone is enough, because none covers every case: a lease needs
+    a tool that reports, and a Claude session uses about as little CPU while
+    the model generates as it does idle (only tool runs show up).
+
+    The tray's "Dashboard columns" submenu edits which dashboard columns
+    count as busy. The dashboard stores that choice and makes the decision;
+    this app only reads the column list and writes the setting.
 
     See readme.md for install steps and the reason behind each setting.
 
 .PARAMETER SelfTest
     Run the checks that need no tray (settings round trip, Claude activity
-    sample, dashboard read, busy leases, restart-command list with its
-    problems), print the results and exit. Leaves the machine in the Away profile.
+    sample, busy leases, the dashboard's watched columns, restart-command list
+    with its problems), print the results and exit. Leaves the machine in the
+    Away profile.
 
 .PARAMETER TraceAuto
     Log the Auto inputs on every poll, to tune the CPU threshold.
@@ -55,10 +59,10 @@ $Config = @{
     AutoQuietMinutes        = 10       # Auto waits this long with no busy signal before Away
     ClaudeBusyCpuMs         = 2000     # CPU per poll (10 s) that marks a session tree busy;
                                        # idle trees measured at up to about 1000
-    # Optional: a claude-status-dashboard board (github.com/mattcowan/claude-status-dashboard).
-    # Set to $null to turn the dashboard signal off; Auto then uses the process checks only.
-    DashboardUrl            = 'http://127.0.0.1:4787/api/board'
-    DashboardFreshHours     = 6        # ignore Working cards with no activity for longer
+    # Optional: the base URL of an agent-status-dashboard (github.com/mattcowan/agent-status-dashboard),
+    # for the "Dashboard columns" submenu. The dashboard tells Auto that a session is busy
+    # through its own lease file, so Auto does not need this. Set to $null to hide the submenu.
+    DashboardBase           = 'http://127.0.0.1:4787'
     HibernateIdleLidClosed  = 2        # minutes idle before hibernating with the lid closed
     HibernateIdleLidOpen    = 10       # minutes idle before hibernating with the lid open
     BatteryFloorPercent     = 15       # at or below this on battery, Keep Working ends (Away, then idle hibernate)
@@ -354,22 +358,75 @@ function Read-RestartCommands {
     return $result
 }
 
-function Get-DashboardWorking {
-    if (-not $Config.DashboardUrl) { return -1 }  # signal turned off
+# The dashboard's columns and the ones it watches for its busy lease (#12,
+# agent-status-dashboard#42). Returns @{ Ok; Columns; Watched; Error }, where
+# Columns holds @{ Key; Label } for every column except Done, in board order,
+# and Watched holds the stored keys. Never the cards: the dashboard decides
+# what is busy (#6), so this app does not learn the card format again.
+#
+# Runs on the UI thread when the menu opens, as Read-RestartCommands does, so
+# each request has a 1-second limit, and the port is probed first. A refused
+# connection is not instant on Windows, even on loopback: TCP retries the SYN,
+# and Invoke-RestMethod took about 1 s to fail (measured), on every menu open
+# for anyone who runs no dashboard. The probe bounds that to 300 ms; a
+# listening loopback port answers in well under 1 ms. No retry and no
+# Start-Sleep. The second request is skipped when the first fails.
+function Test-DashboardPort([string]$Base) {
+    $client = New-Object System.Net.Sockets.TcpClient
     try {
-        $board = Invoke-RestMethod -Uri $Config.DashboardUrl -TimeoutSec 2
-        $fresh = (Get-Date).ToUniversalTime().AddHours(-$Config.DashboardFreshHours)
-        $working = @($board.cards | Where-Object {
-            $_.column -eq 'working' -and -not $_.archivedAt -and -not $_.sessionEndedAt -and
-            $(
-                $stamp = if ($_.lastActiveAt) { $_.lastActiveAt } else { $_.updatedAt }
-                $stamp -and ([datetime]::Parse($stamp).ToUniversalTime() -gt $fresh)
-            )
-        })
-        return $working.Count
+        $uri = [uri]$Base
+        $async = $client.BeginConnect($uri.Host, $uri.Port, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne(300)) { return $false }
+        $client.EndConnect($async)  # throws when the connection was refused
+        return $true
     } catch {
-        return -1  # dashboard not running or unreadable
+        return $false
+    } finally {
+        $client.Close()
     }
+}
+
+function Read-DashboardColumns {
+    $result = @{ Ok = $false; Columns = @(); Watched = @(); Error = '' }
+    if (-not $Config.DashboardBase) { $result.Error = 'turned off'; return $result }
+    $base = "$($Config.DashboardBase)".TrimEnd('/')
+    if (-not (Test-DashboardPort $base)) { $result.Error = "nothing answers at $base"; return $result }
+    try {
+        $cols = Invoke-RestMethod -Uri "$base/api/columns" -TimeoutSec 1 -UseBasicParsing
+        $settings = Invoke-RestMethod -Uri "$base/api/settings" -TimeoutSec 1 -UseBasicParsing
+    } catch {
+        $result.Error = $_.Exception.Message
+        return $result
+    }
+    # An older dashboard has no hibearnate setting; it watches Working only.
+    if (-not $settings.hibearnate -or $null -eq $settings.hibearnate.columns) {
+        $result.Error = 'this dashboard version has no column setting'
+        return $result
+    }
+    $result.Columns = @(@($cols.columns) | Where-Object { $_ -and $_.kind -ne 'done' -and $_.key } | ForEach-Object {
+        [pscustomobject]@{ Key = [string]$_.key; Label = [string]$_.label }
+    })
+    $result.Watched = @(@($settings.hibearnate.columns) | ForEach-Object { [string]$_ })
+    $result.Ok = $true
+    return $result
+}
+
+# Saves the whole list of watched keys, not a toggle, so two quick clicks
+# cannot cross. Returns the list the dashboard saved: it drops keys that are
+# no longer columns, so the caller compares the answer with its request.
+# Throws when the dashboard cannot be reached or refuses the write.
+function Save-DashboardColumns([string[]]$Keys) {
+    $base = "$($Config.DashboardBase)".TrimEnd('/')
+    # [string[]] keeps an empty or one-item list a JSON array in 5.1.
+    $body = @{ hibearnate = @{ columns = [string[]]@($Keys) } } | ConvertTo-Json -Depth 4 -Compress
+    # No Origin header and a loopback Host, so the dashboard's write gate
+    # lets this through, as it does for its own CLI.
+    $saved = Invoke-RestMethod -Uri "$base/api/settings" -Method Post -Body $body `
+        -ContentType 'application/json' -TimeoutSec 2 -UseBasicParsing
+    if (-not $saved.hibearnate -or $null -eq $saved.hibearnate.columns) {
+        throw 'the dashboard did not return the column setting'
+    }
+    return ,@(@($saved.hibearnate.columns) | ForEach-Object { [string]$_ })
 }
 
 # Reads the busy leases in $LeaseDir. Returns @{ Active; Problems }, where
@@ -500,11 +557,18 @@ if ($SelfTest) {
         $sample = $activity.Sample($Config.ClaudeBusyCpuMs)
         'Claude sessions: {0}, busy: {1}, new processes: {2}, max CPU ms in {3}s: {4:N0}' -f $sample.Sessions, $sample.BusySessions, $sample.Spawns, $Config.PollSeconds, $sample.MaxCpuMs
         "  per session (pid:cpu+spawns): $($sample.Detail)"
-        "Dashboard Working cards (fresh): $(Get-DashboardWorking)"
         $leases = Read-Leases
         "Busy leases: $(@($leases.Active).Count) in $LeaseDir"
         foreach ($l in $leases.Active) { '  {0}: until {1:yyyy-MM-dd HH:mm:ss}' -f $l.Name, $l.Until.ToLocalTime() }
         foreach ($p in $leases.Problems) { "  PROBLEM: $p" }
+        # Next to the leases: the dashboard's lease follows these columns.
+        $dash = Read-DashboardColumns
+        if ($dash.Ok) {
+            $watchedLabels = @($dash.Columns | Where-Object { $dash.Watched -contains $_.Key } | ForEach-Object { $_.Label })
+            "Dashboard watched columns: $(if ($watchedLabels) { $watchedLabels -join ', ' } else { '(none; the dashboard never keeps Auto awake)' })"
+        } else {
+            "Dashboard watched columns: unknown ($($dash.Error))"
+        }
         "Idle for: $(Format-Span ([Hibearnate.UserIdle]::Get()))"
         $restart = Read-RestartCommands
         "Restart commands: $(@($restart.Commands).Count) in $CommandsPath"
@@ -542,6 +606,7 @@ $State = @{
     AutoReason      = ''
     LeaseNames      = ''          # active lease names at the last Auto poll, to log changes
     LeaseProblems   = ''          # lease file problems at the last Auto poll, to log changes
+    DashboardError  = ''          # why the last column read failed, to log changes
     PendingHibernate = $false
 }
 
@@ -761,7 +826,8 @@ function Test-PendingHibernate {
 
 function Update-AutoMode {
     $sample = $Activity.Sample($Config.ClaudeBusyCpuMs)
-    $cards = Get-DashboardWorking
+    # The dashboard is not read here: it reports its busy cards as a lease
+    # (agent-dashboard-<port>), like any other tool (#6).
     $leases = Read-Leases
     $names = @($leases.Active | ForEach-Object { $_.Name })
     $now = Get-Date
@@ -778,11 +844,10 @@ function Update-AutoMode {
         $State.LeaseProblems = $problemText
     }
 
-    $busy = ($names.Count -gt 0) -or ($cards -gt 0) -or ($sample.BusySessions -gt 0)
+    $busy = ($names.Count -gt 0) -or ($sample.BusySessions -gt 0)
     $reasons = @()
     # The lease name first, so the tooltip still names the tool when it is truncated.
     if ($names.Count -gt 0) { $reasons += $names[0] + $(if ($names.Count -gt 1) { " +$($names.Count - 1)" }) }
-    if ($cards -gt 0) { $reasons += "$cards card" + $(if ($cards -gt 1) { 's' }) }
     if ($sample.BusySessions -gt 0) { $reasons += "$($sample.BusySessions) busy" }
     if ($busy) {
         $State.AutoLastBusy = $now
@@ -790,7 +855,7 @@ function Update-AutoMode {
     }
 
     if ($TraceAuto) {
-        Write-Log ('Auto poll: leases={0} cards={1} sessions={2} busy={3} spawns={4} maxCpuMs={5:N0} [{6}]' -f $names.Count, $cards, $sample.Sessions, $sample.BusySessions, $sample.Spawns, $sample.MaxCpuMs, $sample.Detail)
+        Write-Log ('Auto poll: leases={0} sessions={1} busy={2} spawns={3} maxCpuMs={4:N0} [{5}]' -f $names.Count, $sample.Sessions, $sample.BusySessions, $sample.Spawns, $sample.MaxCpuMs, $sample.Detail)
     }
 
     $quiet = -not $State.AutoLastBusy -or ($now - $State.AutoLastBusy).TotalMinutes -ge $Config.AutoQuietMinutes
@@ -1207,6 +1272,80 @@ foreach ($minutes in $Config.KeepWorkingChoices) {
 $MenuAuto = New-Object System.Windows.Forms.ToolStripMenuItem 'Auto (follow Claude and busy tools)'
 $MenuAuto.add_Click({ try { Enter-Auto } catch { Write-Log "ERROR: $_" } })
 
+# Which dashboard columns keep Auto awake (#12). Filled by Sync-DashboardMenu
+# each time the menu opens, so a new or renamed column shows without a
+# restart. The dashboard holds the setting and decides what is busy; this
+# menu is only a second place to edit it (the first is the dashboard's own
+# Settings dialog). Not in the menu when DashboardBase is $null.
+$MenuDashboard = New-Object System.Windows.Forms.ToolStripMenuItem 'Dashboard columns'
+
+# Labels come from the dashboard, so they are text only: never a file name, a
+# command line or a format string. '&' is the mnemonic prefix in a menu
+# item's Text, so it is doubled. A long label is cut so the menu stays narrow.
+function Format-MenuLabel([string]$Label) {
+    $text = $Label.Trim()
+    if (-not $text) { $text = '(no name)' }
+    if ($text.Length -gt 60) { $text = $text.Substring(0, 59) + [char]0x2026 }
+    return $text.Replace('&', '&&')
+}
+
+function Sync-DashboardMenu {
+    if (-not $Config.DashboardBase) { return }
+    $old = @($MenuDashboard.DropDownItems)
+    $MenuDashboard.DropDownItems.Clear()
+    foreach ($item in $old) { $item.Dispose() }
+
+    $read = Read-DashboardColumns
+    if (-not $read.Ok) {
+        # One disabled item, so the submenu still opens and says why. The
+        # reason is in the log only when it changes, not on every open.
+        $text = if ($read.Error -like '*no column setting*') { 'Update the dashboard to choose columns' } else { 'Dashboard not running' }
+        $item = New-Object System.Windows.Forms.ToolStripMenuItem $text
+        $item.Enabled = $false
+        [void]$MenuDashboard.DropDownItems.Add($item)
+        if ($read.Error -ne $State.DashboardError) {
+            Write-Log "Dashboard columns: not read: $($read.Error)"
+            $State.DashboardError = $read.Error
+        }
+        return
+    }
+    $State.DashboardError = ''
+    foreach ($col in $read.Columns) {
+        $item = New-Object System.Windows.Forms.ToolStripMenuItem (Format-MenuLabel $col.Label)
+        $item.Tag = $col.Key
+        $item.Checked = $read.Watched -contains $col.Key
+        $item.add_Click({ param($s, $e) try { Switch-DashboardColumn $s } catch { Write-Log "ERROR: $_" } })
+        [void]$MenuDashboard.DropDownItems.Add($item)
+    }
+}
+
+# Ticks or clears one column. The list sent is built from every item's tick,
+# with only the clicked one flipped, and the ticks change only after the
+# dashboard answers, to what it saved. If the save fails, or the dashboard
+# did not keep the change (the column was deleted after the menu opened),
+# the tick stays as it was, and the log and a note say so.
+function Switch-DashboardColumn($Item) {
+    $want = -not $Item.Checked
+    $items = @($MenuDashboard.DropDownItems | Where-Object { $_.Tag -is [string] })
+    $keys = @(foreach ($i in $items) {
+        $on = if ([object]::ReferenceEquals($i, $Item)) { $want } else { $i.Checked }
+        if ($on) { [string]$i.Tag }
+    })
+    try {
+        $saved = Save-DashboardColumns $keys
+    } catch {
+        Write-Log "WARNING: dashboard columns not saved: $($_.Exception.Message)"
+        Show-Note 'Could not save the dashboard columns. See the log.'
+        return
+    }
+    if (($saved -contains [string]$Item.Tag) -ne $want) {
+        Write-Log "WARNING: dashboard columns: the dashboard did not keep the change to '$($Item.Tag)'; saved: $($saved -join ', ')"
+        Show-Note 'The dashboard did not keep that change. See the log.'
+    }
+    foreach ($i in $items) { $i.Checked = $saved -contains [string]$i.Tag }
+    Write-Log "Dashboard columns watched: $(if ($saved) { $saved -join ', ' } else { 'none' })"
+}
+
 $MenuExplorer = New-Object System.Windows.Forms.ToolStripMenuItem 'Restart Explorer'
 $MenuExplorer.ShortcutKeyDisplayString = 'Ctrl+Alt+Shift+E'
 $MenuExplorer.add_Click({ try { Restart-Explorer } catch { Write-Log "ERROR: $_" } })
@@ -1239,15 +1378,21 @@ $MenuExit.add_Click({ Stop-App 'menu' })
 
 [void]$Menu.Items.AddRange(@(
     $MenuAway, $MenuKeep, $MenuAuto,
-    (New-Object System.Windows.Forms.ToolStripSeparator),
+    (New-Object System.Windows.Forms.ToolStripSeparator)))
+if ($Config.DashboardBase) {
+    [void]$Menu.Items.AddRange(@($MenuDashboard, (New-Object System.Windows.Forms.ToolStripSeparator)))
+}
+[void]$Menu.Items.AddRange(@(
     $MenuExplorer, $MenuRestart, $MenuLog,
     (New-Object System.Windows.Forms.ToolStripSeparator),
     $MenuExit
 ))
 $Tray.ContextMenuStrip = $Menu
 $Menu.add_Opening({
-    # Fresh "time left", and restart commands saved since the last poll.
+    # Fresh "time left", restart commands saved since the last poll, and the
+    # dashboard's current columns and ticks.
     try { Sync-RestartCommands } catch { Write-Log "ERROR: $_" }
+    try { Sync-DashboardMenu } catch { Write-Log "ERROR: $_" }
     try { Update-Tray } catch { Write-Log "ERROR: $_" }
 })
 
