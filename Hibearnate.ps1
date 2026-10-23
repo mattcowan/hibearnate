@@ -386,20 +386,37 @@ function Test-DashboardPort([string]$Base) {
     }
 }
 
+# Reason says why a read failed, for the menu text; Error holds the detail,
+# for the log. 'Down': nothing accepts a connection on the port. 'Failed': the
+# port answers but a request did not succeed (a timeout, an HTTP error, or a
+# program on the port that is not the dashboard), so "not running" would be
+# wrong. 'Old': a dashboard without the column setting.
 function Read-DashboardColumns {
-    $result = @{ Ok = $false; Columns = @(); Watched = @(); Error = '' }
-    if (-not $Config.DashboardBase) { $result.Error = 'turned off'; return $result }
+    $result = @{ Ok = $false; Columns = @(); Watched = @(); Reason = ''; Error = '' }
+    if (-not $Config.DashboardBase) { $result.Reason = 'Off'; $result.Error = 'turned off'; return $result }
     $base = "$($Config.DashboardBase)".TrimEnd('/')
-    if (-not (Test-DashboardPort $base)) { $result.Error = "nothing answers at $base"; return $result }
+    if (-not (Test-DashboardPort $base)) {
+        $result.Reason = 'Down'
+        $result.Error = "nothing answers at $base"
+        return $result
+    }
     try {
         $cols = Invoke-RestMethod -Uri "$base/api/columns" -TimeoutSec 1 -UseBasicParsing
         $settings = Invoke-RestMethod -Uri "$base/api/settings" -TimeoutSec 1 -UseBasicParsing
     } catch {
+        $result.Reason = 'Failed'
         $result.Error = $_.Exception.Message
+        return $result
+    }
+    # Something on the port answered with JSON, but not with a column list.
+    if ($null -eq $cols -or $null -eq $cols.columns) {
+        $result.Reason = 'Failed'
+        $result.Error = "$base/api/columns did not return a column list"
         return $result
     }
     # An older dashboard has no hibearnate setting; it watches Working only.
     if (-not $settings.hibearnate -or $null -eq $settings.hibearnate.columns) {
+        $result.Reason = 'Old'
         $result.Error = 'this dashboard version has no column setting'
         return $result
     }
@@ -1299,7 +1316,11 @@ function Sync-DashboardMenu {
     if (-not $read.Ok) {
         # One disabled item, so the submenu still opens and says why. The
         # reason is in the log only when it changes, not on every open.
-        $text = if ($read.Error -like '*no column setting*') { 'Update the dashboard to choose columns' } else { 'Dashboard not running' }
+        $text = switch ($read.Reason) {
+            'Old'    { 'Update the dashboard to choose columns' }
+            'Failed' { 'Dashboard not reachable. See the log.' }
+            default  { 'Dashboard not running' }
+        }
         $item = New-Object System.Windows.Forms.ToolStripMenuItem $text
         $item.Enabled = $false
         [void]$MenuDashboard.DropDownItems.Add($item)
