@@ -37,6 +37,7 @@ Click the tray icon with the left or the right mouse button to open the menu.
 | Keep Working > For 20 minutes, 1 hour, 2 hours, 3 hours | Closing the lid does nothing. The laptop does not go to sleep. The screen still turns off on its normal timer. |
 | Keep Working > Until I switch back | The same as above, with no time limit. |
 | Auto (follow Claude and busy tools) | Keep Working while a Claude Code session or another tool is busy. Away when all are quiet. See [How Auto decides](#how-auto-decides). |
+| Dashboard columns > (column) | Ticks or clears a column of the agent dashboard. A recent card in a ticked column keeps Auto awake. See [Choose the dashboard columns](#choose-the-dashboard-columns). |
 | Restart Explorer | Restarts Explorer, the Start menu, and search. The hotkey is Ctrl+Alt+Shift+E. |
 | Restart an app > (name) | Stops all the processes of an app in your list, then starts the app again. See [Restart other apps](#restart-other-apps). |
 | Restart an app > Edit the list... | Opens your list in Notepad. |
@@ -70,8 +71,7 @@ On battery, the charge can fall to 15% or less in Keep Working. Then the app goe
 
 Auto checks every 10 seconds. Auto keeps the laptop awake if one of these is true:
 
-- A tool reported that it is busy, and the time limit of the report did not end. See [Tell Auto that a tool is busy](#tell-auto-that-a-tool-is-busy).
-- Optional: a [claude-status-dashboard](https://github.com/mattcowan/claude-status-dashboard) board at `http://127.0.0.1:4787` has a card in the Working column with activity in the last 6 hours. If no dashboard runs, Auto uses the other signals. To turn this signal off, set `DashboardUrl` to `$null` in `$Config`.
+- A tool reported that it is busy, and the time limit of the report did not end. See [Tell Auto that a tool is busy](#tell-auto-that-a-tool-is-busy). The [agent dashboard](https://github.com/mattcowan/agent-status-dashboard) is one of these tools. It reports while a recent card is in a column that you chose. See [Choose the dashboard columns](#choose-the-dashboard-columns).
 - The process tree of a Claude session started a new process since the last check. A session that runs tools starts `bash`, `git`, and similar processes all the time. A quiet session starts none.
 - The process tree of a Claude session used 2 seconds of CPU in the last 10 seconds. This catches a long build or test run.
 
@@ -82,11 +82,28 @@ One signal is enough. Auto goes back to Away after 10 minutes with no signal. Au
 Each signal has a gap:
 
 - A busy report counts until its time limit ends, also if the tool stopped before without `-Done`.
-- A dashboard card can stay in Working after its session stops.
+- A dashboard card can stay in a watched column after its session stops. The dashboard stops its report when the activity window of that column ends. You set the window in the dashboard. The default is 6 hours.
 - A Claude session uses almost no CPU while the model writes a reply. The process checks see only tool runs.
 - A tool command that starts and stops between two checks is not seen.
 
-The 10-minute quiet period and the dashboard card cover most of these gaps.
+The 10-minute quiet period and the dashboard report cover most of these gaps.
+
+### Choose the dashboard columns
+
+The agent dashboard decides which of its cards are busy. By default, only a card in its **Working** column with activity in the last 6 hours is busy. The dashboard's **⚙ Settings** dialog sets this time for each column. The tray menu does not change it. You can add other columns, for example a custom **Merging** column for a session that waits for a pull request.
+
+To choose the columns, open the tray menu and point to **Dashboard columns**. The submenu shows the columns of the dashboard in board order. **Done** is not in the list. A tick shows each watched column. Click a column to tick it or to clear it. The dashboard saves the choice. The dashboard's **⚙ Settings** dialog changes the same setting.
+
+- The submenu reads the columns each time that you open the menu. A new or renamed column shows at once.
+- If you clear all columns, the dashboard never keeps Auto awake.
+- The submenu sends the ticks that it showed when you opened the menu. If you change the setting in the dashboard while the menu is open, a click in the menu replaces that change. Open the menu again to see the current ticks.
+- If the dashboard does not run, or `DashboardBase` has a wrong address, the submenu shows **Dashboard not running**. The log gives the address that it tried. If the dashboard is too old to have the setting, the submenu shows **Update the dashboard to choose columns**.
+- If a program answers at the dashboard address but the read fails, the submenu shows **Dashboard not reachable. See the log.** The log gives the error.
+- If the dashboard cannot save the choice, the tick does not change. A notification and the log tell you.
+
+Hibearnate does not read the cards. It reads only the list of columns and the setting, and it writes only the setting. The 3-hour limit and the 10-minute quiet period apply to the dashboard report as to all other reports.
+
+The dashboard address is `DashboardBase` in `$Config`, `http://127.0.0.1:4787` by default. To remove the submenu, set `DashboardBase` to `$null`.
 
 ### Tell Auto that a tool is busy
 
@@ -246,7 +263,7 @@ Change the values in the `$Config` block at the top of `Hibearnate.ps1`. Then us
 
 To tune Auto, start the app with `-TraceAuto`. The app then writes the Auto inputs to the log at every check.
 
-To test the settings without the tray, run `.\Hibearnate.ps1 -SelfTest`. It applies both profiles, reads them back, samples the Claude Code sessions, reads the dashboard, and shows the busy reports with their problems. It also shows the restart commands and the errors in the list. It leaves the laptop in Away. If the tray app runs, the self-test stops with an error. Use Exit in the tray menu first.
+To test the settings without the tray, run `.\Hibearnate.ps1 -SelfTest`. It applies both profiles, reads them back, samples the Claude Code sessions, and shows the busy reports with their problems and the watched dashboard columns. It also shows the restart commands and the errors in the list. It leaves the laptop in Away. If the tray app runs, the self-test stops with an error. Use Exit in the tray menu first.
 
 ## Remove
 
