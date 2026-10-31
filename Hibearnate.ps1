@@ -46,6 +46,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 Add-Type -Path (Join-Path $PSScriptRoot 'Hibearnate.cs') -ReferencedAssemblies System.Windows.Forms
+. (Join-Path $PSScriptRoot 'BearIcon.ps1')
 
 # ---------------------------------------------------------------- settings
 
@@ -549,6 +550,17 @@ if (-not $owned) {
         exit 1
     }
     Write-Log 'Second instance exited; one is already running.'
+    # Say so: a start from the Start menu otherwise does nothing visible. A
+    # TopMost owner keeps the box in front, because this process has no
+    # window of its own.
+    $owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false }
+    try {
+        [void][System.Windows.Forms.MessageBox]::Show($owner,
+            'Hibearnate is already running. Look for the bear face in the notification area (click ^ next to the clock if it is hidden).',
+            'Hibearnate', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+    } finally {
+        $owner.Dispose()
+    }
     return
 }
 
@@ -635,39 +647,13 @@ $State.LastResume = $null    # time of the last wake, caps the idle time
 
 # ---------------------------------------------------------------- tray icon
 
-# A bear face. Green = Away, red = Keep Working, orange = Auto, so switching
-# Keep Working to Auto visibly changes the icon even while Auto keeps the
-# machine awake. The eyes show what is applied right now: closed (sleeping)
-# = the Away settings, open = staying awake. Auto also adds a white badge, so
-# the mode never depends on color alone. Drawn at 32 px; Windows scales it.
+# The bear face from BearIcon.ps1. Green = Away, red = Keep Working, orange
+# = Auto, so switching Keep Working to Auto visibly changes the icon even
+# while Auto keeps the machine awake. The eyes show what is applied right
+# now: closed (sleeping) = the Away settings, open = staying awake. Drawn at
+# 32 px; Windows scales it.
 function New-BearIcon([System.Drawing.Color]$Fur, [bool]$Awake, [bool]$Auto) {
-    $bmp = New-Object System.Drawing.Bitmap 32, 32
-    $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.SmoothingMode = 'AntiAlias'
-    $dark = [System.Drawing.Color]::FromArgb(40, 30, 25)
-    # Not $fur: PowerShell names ignore case, so that is the typed $Fur parameter.
-    $furBrush = New-Object System.Drawing.SolidBrush $Fur
-    $ink = New-Object System.Drawing.SolidBrush $dark
-
-    $g.FillEllipse($furBrush, 2, 2, 11, 11)    # ears
-    $g.FillEllipse($furBrush, 19, 2, 11, 11)
-    $g.FillEllipse($furBrush, 3, 5, 26, 25)    # head
-    $g.FillEllipse((New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(245, 236, 222))), 10, 16, 12, 10)  # snout
-    $g.FillEllipse($ink, 14, 17, 4, 3)    # nose
-    if ($Awake) {
-        $g.FillEllipse($ink, 9, 11, 4, 4)
-        $g.FillEllipse($ink, 19, 11, 4, 4)
-    } else {
-        # Sleeping eyes: the lower half of an ellipse, like a closed lid.
-        $pen = New-Object System.Drawing.Pen $dark, 2
-        $g.DrawArc($pen, 8, 9, 6, 5, 0, 180)
-        $g.DrawArc($pen, 18, 9, 6, 5, 0, 180)
-    }
-    if ($Auto) {
-        $g.FillEllipse([System.Drawing.Brushes]::White, 21, 21, 10, 10)
-        $g.DrawEllipse((New-Object System.Drawing.Pen $dark, 1.5), 21, 21, 10, 10)
-    }
-    $g.Dispose()
+    $bmp = New-BearBitmap $Fur $Awake $Auto
     [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
 }
 
