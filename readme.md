@@ -25,7 +25,16 @@ Hibernate stops all of this. But a long Claude Code task needs the laptop fully 
 2. Run `.\Install.ps1`.
 3. Look for a green bear face in the notification area.
 
-`Install.ps1` puts a shortcut in the Startup folder, so the app starts at every login. The shortcut runs PowerShell through `conhost.exe --headless`, so no console window opens. Use `.\Install.ps1 -NoStart` to add the shortcut without a start now.
+`Install.ps1` puts two shortcuts with the name **Hibearnate** on your computer:
+
+- In the Startup folder, so the app starts at every login.
+- In your Start menu, so Windows search finds the app. To start the app again after Exit, press the Windows key, type "hib", and press Enter.
+
+The two shortcuts use the same command. This command runs PowerShell through `conhost.exe --headless`, so no console window opens. The shortcuts show the bear icon. `Install.ps1` writes this icon to `%LOCALAPPDATA%\Hibearnate\hibearnate.ico`. If it cannot write the icon, it shows a warning, and the shortcuts show the console icon.
+
+Use `.\Install.ps1 -NoStart` to add the shortcuts without a start now. If you run `Install.ps1` again, it replaces the two shortcuts. It does not add more shortcuts.
+
+Only one copy of the app runs at a time. If you start the app when it already runs, a message tells you that it runs, and the second copy stops.
 
 ## Use
 
@@ -269,7 +278,7 @@ To test the settings without the tray, run `.\Hibearnate.ps1 -SelfTest`. It appl
 
 1. Run `.\Uninstall.ps1`.
 
-This removes the Startup shortcut and asks the app to stop. The app puts the Away values back before it stops. If the app does not stop in 20 seconds, the script stops it by force and shows a warning. Then the script puts back the settings that the app recorded before its first start, and removes the record. Use `.\Uninstall.ps1 -KeepSettings` to keep the Away values and the record.
+This removes the Startup shortcut, the Start menu shortcut and the bear icon, and asks the app to stop. The app puts the Away values back before it stops. If the app does not stop in 20 seconds, the script stops it by force and shows a warning. Then the script puts back the settings that the app recorded before its first start, and removes the record. Use `.\Uninstall.ps1 -KeepSettings` to keep the Away values and the record.
 
 `Uninstall.ps1` does not remove your list of restart commands.
 
@@ -283,10 +292,11 @@ The app records the original values to `%LOCALAPPDATA%\Hibearnate\baseline.json`
 | --- | --- |
 | `Hibearnate.ps1` | The tray app. |
 | `Hibearnate.cs` | Native helpers: power settings, hotkeys, lid and display events, Claude Code activity. |
+| `BearIcon.ps1` | Draws the bear for the tray and for the shortcut icon. |
 | `Busy.ps1` | Tells Auto that a tool is busy, for a time limit. |
 | `restart-commands.example.json` | The first content of your list of restart commands. |
-| `Install.ps1` | Adds the Startup shortcut and starts the app. |
-| `Uninstall.ps1` | Removes the shortcut, stops the app, and restores the settings. |
+| `Install.ps1` | Adds the Startup shortcut and the Start menu shortcut, and starts the app. |
+| `Uninstall.ps1` | Removes the shortcuts, stops the app, and restores the settings. |
 | `Restore-Baseline.ps1` | Puts back the settings that the app recorded before its first start. |
 | `LICENSE` | The MIT License. |
 

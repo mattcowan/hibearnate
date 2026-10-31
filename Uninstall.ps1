@@ -1,7 +1,8 @@
 <#
 .SYNOPSIS
-    Stops the tray app, removes it from Startup, and restores the power
-    settings recorded before its first run (see Restore-Baseline.ps1).
+    Stops the tray app, removes it from Startup and the Start menu, and
+    restores the power settings recorded before its first run (see
+    Restore-Baseline.ps1).
 
 .DESCRIPTION
     Asks the tray app to exit through a named event, so it puts the Away
@@ -18,10 +19,16 @@ param([switch]$KeepSettings)
 
 $ErrorActionPreference = 'Stop'
 
-$shortcutPath = Join-Path ([Environment]::GetFolderPath('Startup')) 'Hibearnate.lnk'
-if (Test-Path $shortcutPath) {
-    Remove-Item $shortcutPath
-    "Removed $shortcutPath"
+$removePaths = @(
+    (Join-Path ([Environment]::GetFolderPath('Startup')) 'Hibearnate.lnk'),
+    (Join-Path ([Environment]::GetFolderPath('Programs')) 'Hibearnate.lnk'),
+    (Join-Path $env:LOCALAPPDATA 'Hibearnate\hibearnate.ico')  # the shortcuts' icon
+)
+foreach ($path in $removePaths) {
+    if (Test-Path -LiteralPath $path) {
+        Remove-Item -LiteralPath $path
+        "Removed $path"
+    }
 }
 
 $running = @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" |
