@@ -39,8 +39,14 @@ try {
     Save-BearIco $iconPath
     "Created $iconPath"
 } catch {
-    Write-Warning "Could not write the bear icon, so the shortcuts show the conhost icon: $_"
-    $iconPath = $null
+    # Save-BearIco replaces the file only after a full write, so an icon from
+    # an earlier install is still whole (a locked one is the likely failure).
+    if (Test-Path -LiteralPath $iconPath) {
+        Write-Warning "Could not write the bear icon, so the shortcuts keep the earlier one: $_"
+    } else {
+        Write-Warning "Could not write the bear icon, so the shortcuts show the conhost icon: $_"
+        $iconPath = $null
+    }
 }
 
 $shell = New-Object -ComObject WScript.Shell

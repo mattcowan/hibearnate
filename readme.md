@@ -30,7 +30,7 @@ Hibernate stops all of this. But a long Claude Code task needs the laptop fully 
 - In the Startup folder, so the app starts at every login.
 - In your Start menu, so Windows search finds the app. To start the app again after Exit, press the Windows key, type "hib", and press Enter.
 
-The two shortcuts use the same command. This command runs PowerShell through `conhost.exe --headless`, so no console window opens. The shortcuts show the bear icon. `Install.ps1` writes this icon to `%LOCALAPPDATA%\Hibearnate\hibearnate.ico`. If it cannot write the icon, it shows a warning, and the shortcuts show the console icon.
+The two shortcuts use the same command. This command runs PowerShell through `conhost.exe --headless`, so no console window opens. The shortcuts show the bear icon. `Install.ps1` writes this icon to `%LOCALAPPDATA%\Hibearnate\hibearnate.ico`. If it cannot write the icon, it shows a warning. The shortcuts then show the icon from an earlier install, or the console icon if there is no earlier icon.
 
 Use `.\Install.ps1 -NoStart` to add the shortcuts without a start now. If you run `Install.ps1` again, it replaces the two shortcuts. It does not add more shortcuts.
 
