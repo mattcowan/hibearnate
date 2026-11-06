@@ -46,6 +46,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 Add-Type -Path (Join-Path $PSScriptRoot 'Hibearnate.cs') -ReferencedAssemblies System.Windows.Forms
+. (Join-Path $PSScriptRoot 'BearIcon.ps1')
 
 # ---------------------------------------------------------------- settings
 
@@ -549,6 +550,16 @@ if (-not $owned) {
         exit 1
     }
     Write-Log 'Second instance exited; one is already running.'
+    # Say so: a start from the Start menu otherwise does nothing visible. The
+    # running tray shows the note, so this process exits at once. Install.ps1
+    # and Uninstall.ps1 find the tray by command line, so a copy that stayed
+    # open here would read as a tray. A missing event means the tray is still
+    # starting or is on its way out, and it cannot show a note anyway.
+    $showEvent = $null
+    if ([System.Threading.EventWaitHandle]::TryOpenExisting('Local\Hibearnate.Show', [ref]$showEvent)) {
+        [void]$showEvent.Set()
+        $showEvent.Dispose()
+    }
     return
 }
 
@@ -610,6 +621,11 @@ if ($SelfTest) {
 $ExitEvent = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, 'Local\Hibearnate.Exit')
 $ExitEvent.Reset()
 
+# A second start sets this and exits; $ShowTimer answers with a note.
+# Auto-reset, so one start shows one note.
+$ShowEvent = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::AutoReset, 'Local\Hibearnate.Show')
+$ShowEvent.Reset()
+
 # ---------------------------------------------------------------- state
 
 $State = @{
@@ -635,39 +651,13 @@ $State.LastResume = $null    # time of the last wake, caps the idle time
 
 # ---------------------------------------------------------------- tray icon
 
-# A bear face. Green = Away, red = Keep Working, orange = Auto, so switching
-# Keep Working to Auto visibly changes the icon even while Auto keeps the
-# machine awake. The eyes show what is applied right now: closed (sleeping)
-# = the Away settings, open = staying awake. Auto also adds a white badge, so
-# the mode never depends on color alone. Drawn at 32 px; Windows scales it.
+# The bear face from BearIcon.ps1. Green = Away, red = Keep Working, orange
+# = Auto, so switching Keep Working to Auto visibly changes the icon even
+# while Auto keeps the machine awake. The eyes show what is applied right
+# now: closed (sleeping) = the Away settings, open = staying awake. Drawn at
+# 32 px; Windows scales it.
 function New-BearIcon([System.Drawing.Color]$Fur, [bool]$Awake, [bool]$Auto) {
-    $bmp = New-Object System.Drawing.Bitmap 32, 32
-    $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.SmoothingMode = 'AntiAlias'
-    $dark = [System.Drawing.Color]::FromArgb(40, 30, 25)
-    # Not $fur: PowerShell names ignore case, so that is the typed $Fur parameter.
-    $furBrush = New-Object System.Drawing.SolidBrush $Fur
-    $ink = New-Object System.Drawing.SolidBrush $dark
-
-    $g.FillEllipse($furBrush, 2, 2, 11, 11)    # ears
-    $g.FillEllipse($furBrush, 19, 2, 11, 11)
-    $g.FillEllipse($furBrush, 3, 5, 26, 25)    # head
-    $g.FillEllipse((New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(245, 236, 222))), 10, 16, 12, 10)  # snout
-    $g.FillEllipse($ink, 14, 17, 4, 3)    # nose
-    if ($Awake) {
-        $g.FillEllipse($ink, 9, 11, 4, 4)
-        $g.FillEllipse($ink, 19, 11, 4, 4)
-    } else {
-        # Sleeping eyes: the lower half of an ellipse, like a closed lid.
-        $pen = New-Object System.Drawing.Pen $dark, 2
-        $g.DrawArc($pen, 8, 9, 6, 5, 0, 180)
-        $g.DrawArc($pen, 18, 9, 6, 5, 0, 180)
-    }
-    if ($Auto) {
-        $g.FillEllipse([System.Drawing.Brushes]::White, 21, 21, 10, 10)
-        $g.DrawEllipse((New-Object System.Drawing.Pen $dark, 1.5), 21, 21, 10, 10)
-    }
-    $g.Dispose()
+    $bmp = New-BearBitmap $Fur $Awake $Auto
     [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
 }
 
@@ -1418,6 +1408,7 @@ $MenuLog.add_Click({ if (Test-Path $LogPath) { Start-Process notepad.exe $LogPat
 function Stop-App([string]$Why) {
     try { Set-Effective 'Away' 'exit'; Write-Log "Exit: $Why" } catch { Write-Log "ERROR on exit: $_" }
     $Timer.Stop()
+    $ShowTimer.Stop()
     $RestartTimer.Stop()
     if ($Restart.Run) { Write-Log "Restart $($Restart.Run.Command.Name) canceled by exit" }
     $Window.Dispose()
@@ -1505,6 +1496,16 @@ $Timer = New-Object System.Windows.Forms.Timer
 $Timer.Interval = $Config.PollSeconds * 1000
 $Timer.add_Tick({ try { Invoke-Poll } catch { Write-Log "ERROR in poll: $_" } })
 
+# Separate from the poll, which can run 10 s late: the user just pressed Enter
+# and is looking for an answer. A Forms timer, so this runs on the UI thread.
+$ShowTimer = New-Object System.Windows.Forms.Timer
+$ShowTimer.Interval = 1000
+$ShowTimer.add_Tick({
+    try {
+        if ($ShowEvent.WaitOne(0)) { Show-Note 'Hibearnate is already running. Click the bear icon to open the menu.' }
+    } catch { Write-Log "ERROR: $_" }
+})
+
 $null = $Activity.Sample($Config.ClaudeBusyCpuMs)  # baseline for the first Auto poll
 Write-Log "Started (pid $PID)"
 try {
@@ -1522,6 +1523,7 @@ Set-Effective 'Away' 'launch'
 Update-Tray
 try { Sync-RestartCommands } catch { Write-Log "ERROR loading restart commands: $_" }
 $Timer.Start()
+$ShowTimer.Start()
 
 try {
     [System.Windows.Forms.Application]::Run()
