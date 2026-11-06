@@ -33,6 +33,7 @@ $arguments = "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -Wind
 $iconDir = Join-Path $env:LOCALAPPDATA 'Hibearnate'
 $iconPath = Join-Path $iconDir 'hibearnate.ico'
 try {
+    Add-Type -AssemblyName System.Drawing
     . (Join-Path $PSScriptRoot 'BearIcon.ps1')
     $null = New-Item -ItemType Directory -Path $iconDir -Force
     Save-BearIco $iconPath
@@ -51,7 +52,8 @@ foreach ($shortcutPath in $startupPath, $startMenuPath) {
     $shortcut.Arguments = $arguments
     $shortcut.WorkingDirectory = $PSScriptRoot
     $shortcut.Description = 'Hibearnate: power profiles for Windows (Away / Keep Working / Auto) and an Explorer restart hotkey'
-    if ($iconPath) { $shortcut.IconLocation = "$iconPath,0" }
+    # Set both ways: an existing .lnk keeps its old icon path otherwise.
+    $shortcut.IconLocation = if ($iconPath) { "$iconPath,0" } else { "$conhost,0" }
     $shortcut.Save()
     "Created $shortcutPath"
 }

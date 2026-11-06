@@ -24,10 +24,16 @@ $removePaths = @(
     (Join-Path ([Environment]::GetFolderPath('Programs')) 'Hibearnate.lnk'),
     (Join-Path $env:LOCALAPPDATA 'Hibearnate\hibearnate.ico')  # the shortcuts' icon
 )
+# A warning, not a stop: a locked file here must not leave the tray running and
+# the settings unrestored below.
 foreach ($path in $removePaths) {
-    if (Test-Path -LiteralPath $path) {
-        Remove-Item -LiteralPath $path
-        "Removed $path"
+    try {
+        if (Test-Path -LiteralPath $path) {
+            Remove-Item -LiteralPath $path
+            "Removed $path"
+        }
+    } catch {
+        Write-Warning "Could not remove ${path}: $_"
     }
 }
 

@@ -34,7 +34,7 @@ The two shortcuts use the same command. This command runs PowerShell through `co
 
 Use `.\Install.ps1 -NoStart` to add the shortcuts without a start now. If you run `Install.ps1` again, it replaces the two shortcuts. It does not add more shortcuts.
 
-Only one copy of the app runs at a time. If you start the app when it already runs, a message tells you that it runs, and the second copy stops.
+Only one copy of the app runs at a time. If you start the app when it already runs, the second copy stops and the running app shows a note. Windows can hide this note when Do Not Disturb is on.
 
 ## Use
 

@@ -550,16 +550,15 @@ if (-not $owned) {
         exit 1
     }
     Write-Log 'Second instance exited; one is already running.'
-    # Say so: a start from the Start menu otherwise does nothing visible. A
-    # TopMost owner keeps the box in front, because this process has no
-    # window of its own.
-    $owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false }
-    try {
-        [void][System.Windows.Forms.MessageBox]::Show($owner,
-            'Hibearnate is already running. Look for the bear face in the notification area (click ^ next to the clock if it is hidden).',
-            'Hibearnate', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
-    } finally {
-        $owner.Dispose()
+    # Say so: a start from the Start menu otherwise does nothing visible. The
+    # running tray shows the note, so this process exits at once. Install.ps1
+    # and Uninstall.ps1 find the tray by command line, so a copy that stayed
+    # open here would read as a tray. A missing event means the tray is still
+    # starting or is on its way out, and it cannot show a note anyway.
+    $showEvent = $null
+    if ([System.Threading.EventWaitHandle]::TryOpenExisting('Local\Hibearnate.Show', [ref]$showEvent)) {
+        [void]$showEvent.Set()
+        $showEvent.Dispose()
     }
     return
 }
@@ -621,6 +620,11 @@ if ($SelfTest) {
 # the Away settings back) instead of being killed in Keep Working.
 $ExitEvent = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, 'Local\Hibearnate.Exit')
 $ExitEvent.Reset()
+
+# A second start sets this and exits; $ShowTimer answers with a note.
+# Auto-reset, so one start shows one note.
+$ShowEvent = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::AutoReset, 'Local\Hibearnate.Show')
+$ShowEvent.Reset()
 
 # ---------------------------------------------------------------- state
 
@@ -1379,6 +1383,7 @@ $MenuLog.add_Click({ if (Test-Path $LogPath) { Start-Process notepad.exe $LogPat
 function Stop-App([string]$Why) {
     try { Set-Effective 'Away' 'exit'; Write-Log "Exit: $Why" } catch { Write-Log "ERROR on exit: $_" }
     $Timer.Stop()
+    $ShowTimer.Stop()
     $RestartTimer.Stop()
     if ($Restart.Run) { Write-Log "Restart $($Restart.Run.Command.Name) canceled by exit" }
     $Window.Dispose()
@@ -1466,6 +1471,16 @@ $Timer = New-Object System.Windows.Forms.Timer
 $Timer.Interval = $Config.PollSeconds * 1000
 $Timer.add_Tick({ try { Invoke-Poll } catch { Write-Log "ERROR in poll: $_" } })
 
+# Separate from the poll, which can run 10 s late: the user just pressed Enter
+# and is looking for an answer. A Forms timer, so this runs on the UI thread.
+$ShowTimer = New-Object System.Windows.Forms.Timer
+$ShowTimer.Interval = 1000
+$ShowTimer.add_Tick({
+    try {
+        if ($ShowEvent.WaitOne(0)) { Show-Note 'Hibearnate is already running. Click the bear icon to open the menu.' }
+    } catch { Write-Log "ERROR: $_" }
+})
+
 $null = $Activity.Sample($Config.ClaudeBusyCpuMs)  # baseline for the first Auto poll
 Write-Log "Started (pid $PID)"
 try {
@@ -1483,6 +1498,7 @@ Set-Effective 'Away' 'launch'
 Update-Tray
 try { Sync-RestartCommands } catch { Write-Log "ERROR loading restart commands: $_" }
 $Timer.Start()
+$ShowTimer.Start()
 
 try {
     [System.Windows.Forms.Application]::Run()

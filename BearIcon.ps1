@@ -6,10 +6,8 @@
 .DESCRIPTION
     Needs only System.Drawing, so Install.ps1 can use it without compiling
     the C# helper. Defines functions and nothing else: dot-sourcing it has
-    no side effect.
+    no side effect. The caller loads System.Drawing first.
 #>
-
-Add-Type -AssemblyName System.Drawing
 
 # A bear face. The coordinates are for 32 px; other sizes scale the drawing.
 # Awake = open eyes, otherwise closed (sleeping). Auto adds a white badge,
@@ -84,5 +82,10 @@ function Save-BearIco([string]$Path) {
     $tmp = "$Path.tmp"
     [System.IO.File]::WriteAllBytes($tmp, $out.ToArray())
     $w.Dispose()
-    Move-Item -LiteralPath $tmp -Destination $Path -Force
+    try {
+        Move-Item -LiteralPath $tmp -Destination $Path -Force
+    } finally {
+        # Still here only if the move failed, for example on a locked icon.
+        Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue
+    }
 }
