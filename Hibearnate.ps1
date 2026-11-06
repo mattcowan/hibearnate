@@ -1367,6 +1367,31 @@ $MenuExplorer = New-Object System.Windows.Forms.ToolStripMenuItem 'Restart Explo
 $MenuExplorer.ShortcutKeyDisplayString = 'Ctrl+Alt+Shift+E'
 $MenuExplorer.add_Click({ try { Restart-Explorer } catch { Write-Log "ERROR: $_" } })
 
+# The note for one release run. An empty list means none of those keys.
+function Format-StuckKeyNote([string[]]$Released, [string[]]$StillDown) {
+    $parts = @()
+    if ($Released) { $parts += "Released: $($Released -join ', ')." }
+    if ($StillDown) { $parts += "Still down: $($StillDown -join ', ')." }
+    if ($parts) { $parts -join ' ' } else { 'No keys were down.' }
+}
+
+# Menu only, with no hotkey: the keyboard is not reliable when a key is stuck.
+# The log line has the key names only, and only from this one click.
+function Clear-StuckKeys {
+    $result = [Hibearnate.StuckKeys]::Release()
+    $note = Format-StuckKeyNote $result.Released $result.StillDown
+    Write-Log "Stuck keys: $note"
+    Show-Note $note
+}
+
+$MenuStuckKeys = New-Object System.Windows.Forms.ToolStripMenuItem 'Release stuck keys'
+$MenuStuckKeys.add_Click({
+    try { Clear-StuckKeys } catch {
+        Write-Log "ERROR: $_"
+        Show-Note 'Could not release the keys. See the log.'
+    }
+})
+
 # Filled from restart-commands.json by Sync-RestartCommands.
 $MenuRestart = New-Object System.Windows.Forms.ToolStripMenuItem 'Restart an app'
 $MenuEditList = New-Object System.Windows.Forms.ToolStripMenuItem 'Edit the list...'
@@ -1401,7 +1426,7 @@ if ($Config.DashboardBase) {
     [void]$Menu.Items.AddRange(@($MenuDashboard, (New-Object System.Windows.Forms.ToolStripSeparator)))
 }
 [void]$Menu.Items.AddRange(@(
-    $MenuExplorer, $MenuRestart, $MenuLog,
+    $MenuExplorer, $MenuStuckKeys, $MenuRestart, $MenuLog,
     (New-Object System.Windows.Forms.ToolStripSeparator),
     $MenuExit
 ))
