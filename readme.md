@@ -39,6 +39,7 @@ Click the tray icon with the left or the right mouse button to open the menu.
 | Auto (follow Claude and busy tools) | Keep Working while a Claude Code session or another tool is busy. Away when all are quiet. See [How Auto decides](#how-auto-decides). |
 | Dashboard columns > (column) | Ticks or clears a column of the agent dashboard. A recent card in a ticked column keeps Auto awake. See [Choose the dashboard columns](#choose-the-dashboard-columns). |
 | Restart Explorer | Restarts Explorer, the Start menu, and search. The hotkey is Ctrl+Alt+Shift+E. |
+| Release stuck keys | Sends a key-up for each key that Windows reports as down. See [Release stuck keys](#release-stuck-keys). |
 | Restart an app > (name) | Stops all the processes of an app in your list, then starts the app again. See [Restart other apps](#restart-other-apps). |
 | Restart an app > Edit the list... | Opens your list in Notepad. |
 | Open log | Opens the log in Notepad. |
@@ -162,6 +163,22 @@ The restart closes all open File Explorer windows. The tray icon comes back by i
 
 Each restart writes a line to the log. The line gives the Explorer uptime and memory, the time since the last wake from standby, and the time since the display came on. Use these lines to find out if the freezes follow standby or the display timer.
 
+### Release stuck keys
+
+Sometimes Windows reports a key as down when no key is pressed. For example, Left Alt stays down and the keyboard does not work correctly. The mouse still works. Click the tray icon, then click **Release stuck keys**.
+
+The app reads the keys that Windows reports as down, and sends a key-up for each one. Then it shows a note:
+
+- **Released: Left Alt.** The key is now up.
+- **No keys were down.** The app sent nothing.
+- **Still down: Left Alt.** The key-up did not release the key.
+
+A key can stay down for two reasons. You can continue to hold the key, or the keyboard can continue to send it. Also, Windows can block a key-up from this app when a window that runs as administrator has the focus. If this occurs, click a different window and try again.
+
+The app only sends key-ups. It does not send a key-down or a mouse button event, and it does not change Caps Lock, Num Lock or Scroll Lock. It reads the keys only when you click the item, and each click writes one line with the key names to the log.
+
+If a stuck Windows key is released, the Start menu can open.
+
 ### Restart other apps
 
 Some apps stop working correctly until you restart them. For example, the custom buttons of a Logitech mouse can stop working until LG HUB restarts. LG HUB runs as several processes, so a restart in Task Manager takes many steps. A restart command does all the steps at once.
@@ -282,7 +299,7 @@ The app records the original values to `%LOCALAPPDATA%\Hibearnate\baseline.json`
 | File | Purpose |
 | --- | --- |
 | `Hibearnate.ps1` | The tray app. |
-| `Hibearnate.cs` | Native helpers: power settings, hotkeys, lid and display events, Claude Code activity. |
+| `Hibearnate.cs` | Native helpers: power settings, hotkeys, lid and display events, Claude Code activity, stuck keys. |
 | `Busy.ps1` | Tells Auto that a tool is busy, for a time limit. |
 | `restart-commands.example.json` | The first content of your list of restart commands. |
 | `Install.ps1` | Adds the Startup shortcut and starts the app. |

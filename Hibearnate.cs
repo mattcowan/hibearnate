@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Windows.Forms;
 
 namespace Hibearnate
@@ -136,6 +137,181 @@ namespace Hibearnate
             }
             uint now = unchecked((uint)Environment.TickCount);
             return TimeSpan.FromMilliseconds(unchecked(now - info.dwTime));
+        }
+    }
+
+    public class StuckKeyResult
+    {
+        public string[] Released;
+        public string[] StillDown;
+    }
+
+    // Sends a key-up for each key that Windows reports as down. It reads the key
+    // state only when the user asks, so it never records typing. The scan starts
+    // above the mouse buttons (0x01, 0x02, 0x04, 0x05, 0x06), and it only ever
+    // sends key-ups. A key-up does not change a lock key's toggle state: Windows
+    // flips that on key-down.
+    public static class StuckKeys
+    {
+        [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int vk);
+        [DllImport("user32.dll")]
+        private static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extraInfo);
+        [DllImport("user32.dll")]
+        private static extern uint MapVirtualKey(uint code, uint mapType);
+
+        private const int FirstVk = 0x08;
+        private const int LastVk = 0xFE;
+        private const int KeyDownBit = 0x8000;
+        private const uint KEYEVENTF_EXTENDEDKEY = 0x1;
+        private const uint KEYEVENTF_KEYUP = 0x2;
+        private const uint MAPVK_VK_TO_VSC = 0;
+        private const int VkShift = 0x10;
+        private const int VkControl = 0x11;
+        private const int VkAlt = 0x12;
+
+        // Injected input reaches the key state through the input thread and any
+        // low-level hooks that other apps install, so it is not instant. The wait
+        // ends as soon as the keys read as up. Only a key that stays down costs
+        // the full time. This runs on the UI thread, so keep it short.
+        private const int WaitMs = 200;
+
+        public static StuckKeyResult Release()
+        {
+            List<int> down = ReadDown();
+            if (down.Count > 0)
+            {
+                // The generic keys read as down while a side-specific key is
+                // down, so send them only if they stay down without it.
+                List<int> specific = down.FindAll(delegate(int vk) { return !IsGeneric(vk); });
+                foreach (int vk in specific)
+                {
+                    SendKeyUp(vk);
+                }
+                WaitUntilUp(specific);
+
+                List<int> generic = down.FindAll(IsGeneric);
+                foreach (int vk in generic)
+                {
+                    if (IsDown(vk))
+                    {
+                        SendKeyUp(vk);
+                    }
+                }
+                WaitUntilUp(generic);
+            }
+
+            List<int> released = new List<int>();
+            List<int> stillDown = new List<int>();
+            foreach (int vk in down)
+            {
+                (IsDown(vk) ? stillDown : released).Add(vk);
+            }
+            StuckKeyResult result = new StuckKeyResult();
+            result.Released = Names(released);
+            result.StillDown = Names(stillDown);
+            return result;
+        }
+
+        private static List<int> ReadDown()
+        {
+            List<int> down = new List<int>();
+            for (int vk = FirstVk; vk <= LastVk; vk++)
+            {
+                if (IsDown(vk))
+                {
+                    down.Add(vk);
+                }
+            }
+            return down;
+        }
+
+        private static bool IsDown(int vk)
+        {
+            return (GetAsyncKeyState(vk) & KeyDownBit) != 0;
+        }
+
+        private static bool IsGeneric(int vk)
+        {
+            return vk == VkShift || vk == VkControl || vk == VkAlt;
+        }
+
+        private static void WaitUntilUp(List<int> keys)
+        {
+            Stopwatch clock = Stopwatch.StartNew();
+            while (keys.Exists(IsDown) && clock.ElapsedMilliseconds < WaitMs)
+            {
+                Thread.Sleep(5);
+            }
+        }
+
+        private static void SendKeyUp(int vk)
+        {
+            uint flags = KEYEVENTF_KEYUP | (IsExtended(vk) ? KEYEVENTF_EXTENDEDKEY : 0);
+            byte scan = (byte)MapVirtualKey((uint)vk, MAPVK_VK_TO_VSC);
+            keybd_event((byte)vk, scan, flags, UIntPtr.Zero);
+        }
+
+        // The keys that the keyboard sends with an E0 prefix.
+        private static bool IsExtended(int vk)
+        {
+            return (vk >= 0x21 && vk <= 0x28)    // Page Up to Down arrow
+                || vk == 0x2C || vk == 0x2D || vk == 0x2E    // Print Screen, Insert, Delete
+                || (vk >= 0x5B && vk <= 0x5D)    // Windows keys, Menu key
+                || vk == 0x6F || vk == 0x90      // numeric keypad /, Num Lock
+                || vk == 0xA3 || vk == 0xA5      // Right Ctrl, Right Alt
+                || (vk >= 0xA6 && vk <= 0xB7);   // browser, volume and media keys
+        }
+
+        // Leaves out Alt when Left Alt or Right Alt is in the list (and the same
+        // for Shift and Ctrl): the generic key is the same key, named twice.
+        private static string[] Names(List<int> keys)
+        {
+            List<string> names = new List<string>();
+            foreach (int vk in keys)
+            {
+                bool namedBySide =
+                    (vk == VkShift && (keys.Contains(0xA0) || keys.Contains(0xA1))) ||
+                    (vk == VkControl && (keys.Contains(0xA2) || keys.Contains(0xA3))) ||
+                    (vk == VkAlt && (keys.Contains(0xA4) || keys.Contains(0xA5)));
+                if (!namedBySide)
+                {
+                    names.Add(KeyName(vk));
+                }
+            }
+            return names.ToArray();
+        }
+
+        private static string KeyName(int vk)
+        {
+            switch (vk)
+            {
+                case 0x0D: return "Enter";
+                case 0x10: return "Shift";
+                case 0x11: return "Ctrl";
+                case 0x12: return "Alt";
+                case 0x14: return "Caps Lock";
+                case 0x1B: return "Esc";
+                case 0x21: return "Page Up";
+                case 0x22: return "Page Down";
+                case 0x2C: return "Print Screen";
+                case 0x5B: return "Left Windows";
+                case 0x5C: return "Right Windows";
+                case 0x5D: return "Menu";
+                case 0x90: return "Num Lock";
+                case 0x91: return "Scroll Lock";
+                case 0xA0: return "Left Shift";
+                case 0xA1: return "Right Shift";
+                case 0xA2: return "Left Ctrl";
+                case 0xA3: return "Right Ctrl";
+                case 0xA4: return "Left Alt";
+                case 0xA5: return "Right Alt";
+            }
+            if (vk >= 0x30 && vk <= 0x39)
+            {
+                return ((char)vk).ToString();    // the Keys names are D0 to D9
+            }
+            return Enum.IsDefined(typeof(Keys), vk) ? ((Keys)vk).ToString() : "Key 0x" + vk.ToString("X2");
         }
     }
 
